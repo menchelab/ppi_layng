@@ -48,24 +48,29 @@ class SkipGram(nn.Module):
         return pos_logits, neg_logits
 
 
-def extract_pairs(walks, window):
-    """From walks (num_walks, walk_len), extract (center, context) pairs."""
+def extract_pairs_vectorized(walks_t: torch.Tensor, window: int):
+    """
+    Vectorized extraction of (center, context) pairs from walks tensor.
+    walks_t: (num_walks, walk_len) long tensor on GPU/CPU.
+    Keeps only valid tokens (>=0) to avoid padding contamination.
+    """
     centers = []
     contexts = []
-    for i in tqdm(range(walks.shape[0]), desc="Extracting (center, context) pairs", unit=" walks"):
-        for j in range(walks.shape[1]):
-            center = walks[i, j]
-            if center < 0:
-                continue
-            for k in range(max(0, j - window), min(walks.shape[1], j + window + 1)):
-                if k == j:
-                    continue
-                context = walks[i, k]
-                if context < 0:
-                    continue
-                centers.append(center)
-                contexts.append(context)
-    return np.array(centers, dtype=np.int64), np.array(contexts, dtype=np.int64)
+    for offset in range(-window, window + 1):
+        if offset == 0:
+            continue
+        if offset < 0:
+            c = walks_t[:, -offset:]
+            ctx = walks_t[:, :offset]
+        else:
+            c = walks_t[:, :-offset]
+            ctx = walks_t[:, offset:]
+        centers.append(c.reshape(-1))
+        contexts.append(ctx.reshape(-1))
+    centers_t = torch.cat(centers)
+    contexts_t = torch.cat(contexts)
+    valid = (centers_t >= 0) & (contexts_t >= 0)
+    return centers_t[valid], contexts_t[valid]
 
 
 def main():
@@ -85,26 +90,21 @@ def main():
     vocab_size = len(node_map)
     print(f"Vocabulary size: {vocab_size}")
 
-    # Extract (center, context) pairs
-    centers, contexts = extract_pairs(walks, SKIPGRAM_WINDOW)
-    num_pairs = len(centers)
+    # Extract (center, context) pairs (vectorized)
+    walks_t = torch.from_numpy(walks).to(device=device, dtype=torch.long)
+    centers_t, contexts_t = extract_pairs_vectorized(walks_t, SKIPGRAM_WINDOW)
+    del walks_t
+    num_pairs = int(centers_t.numel())
     print(f"Training pairs: {num_pairs}")
 
-    rng = np.random.default_rng(42)
+    # Subsample to cap early to reduce compute/memory.
+    # Uses sampling with replacement to avoid huge randperm allocations for 1B+ pairs.
     if SKIPGRAM_MAX_PAIRS is not None and num_pairs > SKIPGRAM_MAX_PAIRS:
-        idx = rng.choice(num_pairs, size=SKIPGRAM_MAX_PAIRS, replace=False)
-        centers = centers[idx]
-        contexts = contexts[idx]
-        num_pairs = SKIPGRAM_MAX_PAIRS
+        idx = torch.randint(0, num_pairs, (SKIPGRAM_MAX_PAIRS,), device=device)
+        centers_t = centers_t[idx]
+        contexts_t = contexts_t[idx]
+        num_pairs = int(SKIPGRAM_MAX_PAIRS)
         print(f"Subsampled to {num_pairs} pairs")
-
-    # Negative sampling: sample random node ids
-    neg_contexts = rng.integers(0, vocab_size, size=(num_pairs, SKIPGRAM_NEGATIVE_SAMPLES))
-
-    # To GPU tensors
-    centers_t = torch.from_numpy(centers).to(device)
-    contexts_t = torch.from_numpy(contexts).to(device)
-    neg_contexts_t = torch.from_numpy(neg_contexts).to(device)
 
     model = SkipGram(vocab_size, EMBED_DIM).to(device)
     opt = torch.optim.SGD(model.parameters(), lr=SKIPGRAM_LEARNING_RATE)
@@ -114,7 +114,7 @@ def main():
     for epoch in tqdm(range(SKIPGRAM_EPOCHS), desc="Skip-gram epochs", unit=" epoch"):
         model.train()
         epoch_loss = 0.0
-        perm = rng.permutation(num_pairs)
+        perm = torch.randperm(num_pairs, device=device)
         batch_iter = tqdm(range(num_batches), desc=f"Epoch {epoch + 1}", leave=False, unit=" batch")
         for b in batch_iter:
             start = b * SKIPGRAM_BATCH_SIZE
@@ -122,7 +122,7 @@ def main():
             idx = perm[start:end]
             c = centers_t[idx]
             ctx = contexts_t[idx]
-            neg = neg_contexts_t[idx]
+            neg = torch.randint(0, vocab_size, (c.size(0), SKIPGRAM_NEGATIVE_SAMPLES), device=device)
             pos_logits, neg_logits = model(c, ctx, neg)
             pos_loss = torch.nn.functional.logsigmoid(pos_logits).neg().mean()
             neg_loss = torch.nn.functional.logsigmoid(-neg_logits).neg().mean()
