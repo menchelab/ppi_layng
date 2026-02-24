@@ -1,4 +1,4 @@
-# PPI 3D layout (GO2Vec)
+# PPI 3D layout w/ GO Ontology
 
 Pipeline for 3D embeddings of large PPI networks (~20k nodes) by fusing the interaction graph with Gene Ontology: unified graph → node2vec walks → skip-gram embeddings → manifold projection (UMAP/PaCMAP) with optional de-compression (hub scaling, LOF denoise, force-directed refinement).
 
