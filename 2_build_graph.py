@@ -45,7 +45,8 @@ def load_ontology_terms(obo_path):
 
 def load_annotation_edges(gaf_path, protein_set, go_terms):
     """Load (protein_id, go_id) from GAF; filter to protein_set and go_terms."""
-    # GAF 2.2: col 1 = DB Object ID, col 4 = GO ID (0-indexed)
+    # GAF 2.2: col 2 (0-indexed 1) = DB Object ID, col 5 (0-indexed 4) = GO ID
+    # (col 1 = DB e.g. UniProtKB, col 2 = accession). Protein IDs must match edges.tsv.
     COL_DB_OBJECT_ID = 1
     COL_GO_ID = 4
     edges = set()

@@ -1,5 +1,8 @@
 """
 Step 5: Project protein embeddings to 3D with cuML UMAP; write layout TSV.
+
+this is without decompression, see 6.
+
 Inputs: output/embeddings.npy (or .parquet), output/node_map.parquet.
 Outputs: output/layout.tsv (node_id, x, y, z) for proteins only.
 """

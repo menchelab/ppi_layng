@@ -23,6 +23,7 @@ from utils.preprocess_embeddings import apply_preprocess
 from utils.pacmap_expansion import pacmap_3d
 from utils.lof_denoise import ambiguous_mask, place_outliers_back
 from utils.force_directed_3d import refine_3d_repulsion
+from utils.normalize_layout import normalize_to_cube
 
 try:
     from utils.umap_projection import umap_3d
@@ -93,6 +94,7 @@ def main():
                 min_dist=UMAP_MIN_DIST,
                 random_state=UMAP_RANDOM_STATE,
             )
+            coords = normalize_to_cube(coords, method="percentile", low=0.5, high=99.5)
             data[f"x_{name}"] = coords[:, 0]
             data[f"y_{name}"] = coords[:, 1]
             data[f"z_{name}"] = coords[:, 2]
@@ -108,6 +110,7 @@ def main():
             FP_ratio=PACMAP_FP_RATIO,
             random_state=UMAP_RANDOM_STATE,
         )
+        coords = normalize_to_cube(coords, method="percentile", low=0.5, high=99.5)
         data[f"x_{name}"] = coords[:, 0]
         data[f"y_{name}"] = coords[:, 1]
         data[f"z_{name}"] = coords[:, 2]
@@ -126,6 +129,7 @@ def main():
         random_state=UMAP_RANDOM_STATE,
     )
     coords_lof = place_outliers_back(coords_core, mask_keep, X_lof, k=5)
+    coords_lof = normalize_to_cube(coords_lof, method="percentile", low=0.5, high=99.5)
     name_lof = "pacmap_expansion_lof"
     data[f"x_{name_lof}"] = coords_lof[:, 0]
     data[f"y_{name_lof}"] = coords_lof[:, 1]
@@ -139,6 +143,7 @@ def main():
             random_state=UMAP_RANDOM_STATE,
         )
         coords_umap_lof = place_outliers_back(coords_core_umap, mask_keep, X_lof, k=5)
+        coords_umap_lof = normalize_to_cube(coords_umap_lof, method="percentile", low=0.5, high=99.5)
         name_umap_lof = "umap_lof"
         data[f"x_{name_umap_lof}"] = coords_umap_lof[:, 0]
         data[f"y_{name_umap_lof}"] = coords_umap_lof[:, 1]
@@ -149,6 +154,7 @@ def main():
     if HAS_TRIMAP:
         X_raw = preprocessed["raw"]
         coords_tm = trimap_3d(X_raw, random_state=UMAP_RANDOM_STATE)
+        coords_tm = normalize_to_cube(coords_tm, method="percentile", low=0.5, high=99.5)
         data["x_trimap_3d"] = coords_tm[:, 0]
         data["y_trimap_3d"] = coords_tm[:, 1]
         data["z_trimap_3d"] = coords_tm[:, 2]
@@ -172,6 +178,7 @@ def main():
                 k_repel=FD_K_REPEL,
                 random_state=UMAP_RANDOM_STATE,
             )
+            coords_fd = normalize_to_cube(coords_fd, method="percentile", low=0.5, high=99.5)
             name_fd = f"{name_base}_fd"
             data[f"x_{name_fd}"] = coords_fd[:, 0]
             data[f"y_{name_fd}"] = coords_fd[:, 1]

@@ -37,6 +37,8 @@ From `edge_list` + `node_map`, infers protein → GO term IDs from annotation ed
 **`8_distribution_charts.py`**  
 Reads the final layout TSV (same precedence as step 7), discovers all `x_*`, `y_*`, `z_*` method columns, and plots one row per method with three density histograms (x, y, z). Writes `output/distribution_charts.png`. Usage: `python 8_distribution_charts.py [layout.tsv]`.
 
+Layout coordinates from steps 5 and 6 are **normalized to [-1, 1]³** (percentile-based per axis) so all methods use the same scale and collapsed “ball” layouts are stretched for comparison. To check per-method spread and flag collapsed layouts, run `python -m utils.distribution_analysis output/layout_decompression.tsv`.
+
 ---
 
 ## Outputs

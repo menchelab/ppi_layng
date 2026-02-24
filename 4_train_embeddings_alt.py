@@ -73,7 +73,10 @@ def extract_pairs_vectorized(walks_t, window):
         centers.append(c.reshape(-1))
         contexts.append(ctx.reshape(-1))
         
-    return torch.cat(centers), torch.cat(contexts)
+    centers_t = torch.cat(centers)
+    contexts_t = torch.cat(contexts)
+    valid = (centers_t >= 0) & (contexts_t >= 0)
+    return centers_t[valid], contexts_t[valid]
 
 def main():
     device = require_torch_cuda()

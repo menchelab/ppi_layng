@@ -42,3 +42,7 @@ venv.bak/
 # --- OS Specific ---
 .DS_Store
 Thumbs.db
+
+# --- Project Data Artifacts ---
+input/
+output/

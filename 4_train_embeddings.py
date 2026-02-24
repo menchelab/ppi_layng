@@ -55,10 +55,16 @@ def extract_pairs(walks, window):
     for i in tqdm(range(walks.shape[0]), desc="Extracting (center, context) pairs", unit=" walks"):
         for j in range(walks.shape[1]):
             center = walks[i, j]
+            if center < 0:
+                continue
             for k in range(max(0, j - window), min(walks.shape[1], j + window + 1)):
-                if k != j:
-                    centers.append(center)
-                    contexts.append(walks[i, k])
+                if k == j:
+                    continue
+                context = walks[i, k]
+                if context < 0:
+                    continue
+                centers.append(center)
+                contexts.append(context)
     return np.array(centers, dtype=np.int64), np.array(contexts, dtype=np.int64)
 
 

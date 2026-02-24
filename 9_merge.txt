@@ -1,0 +1,3 @@
+# inject to existing node list for visualisation
+python utils/tsv_merge.py ../asdf10k/public/data/ppichloe/nodes.tsv output/layout.tsv ../asdf10k/public/data/ppichloe/nodes_w_layout.tsv node_id id _ppilayng
+python utils/tsv_merge.py ../asdf10k/public/data/ppichloe/nodes_orig.tsv output/layout_decompression.tsv ../asdf10k/public/data/ppichloe/nodes.tsv id node_id

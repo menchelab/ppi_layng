@@ -112,9 +112,8 @@ def main():
     if walks_arr.shape[1] > WALK_LENGTH:
         walks_arr = walks_arr[:, :WALK_LENGTH]
 
-    # Replace -1 (padded) with 0 for training (skip-gram will skip invalid if we mask, or use 0 as dummy)
-    # Actually -1 can break embedding lookup; use 0 as padding index (node 0 exists)
-    walks_arr[walks_arr < 0] = 0
+    # Keep -1 padding as invalid marker. Step 4 must skip invalid centers/contexts.
+    # Converting -1 to 0 would inject synthetic occurrences of real node 0.
 
     # Save as parquet (DataFrame with columns step_0 .. step_99)
     out_df = cudf.DataFrame({f"step_{i}": walks_arr[:, i] for i in tqdm(range(walks_arr.shape[1]), desc="Writing walk columns", unit=" cols")})

@@ -1,5 +1,8 @@
 """
 Step 1: Download GO ontology (go-basic.obo) and GAF (goa_human) to data/.
+
+Do manually if 403, just two links from config.py and decompress + put in data/
+
 """
 import gzip
 import shutil
