@@ -1,0 +1,14 @@
+
+# RAPIDS (cudf, cugraph, cuml) via conda:
+#   conda create -n go2vec -c rapidsai -c conda-forge -c nvidia cudf cugraph cuml python=3.10
+#   conda activate go2vec
+#  PyTorch with CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118  # or your CUDA version
+#   pip install -r requirements-go2vec.txt
+
+obonet>=1.1.0
+pandas>=1.5.0
+pyarrow>=10.0.0
+numpy>=1.20.0
+tqdm>=4.60.0
+pacmap>=0.7.0
