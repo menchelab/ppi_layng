@@ -26,11 +26,11 @@ NODE2VEC_Q = 1.5   # 1.0 = community; 1.5–2.0 = structural equivalence (better
 
 # Embedding - hopefully optimized for RTX 5090
 EMBED_DIM = 100
-SKIPGRAM_WINDOW = 5
+SKIPGRAM_WINDOW = 3
 SKIPGRAM_EPOCHS = 15
-SKIPGRAM_BATCH_SIZE = 8192  
+SKIPGRAM_BATCH_SIZE = 1024  
 SKIPGRAM_NEGATIVE_SAMPLES = 10
-SKIPGRAM_LEARNING_RATE = 0.025 
+SKIPGRAM_LEARNING_RATE = 0.05 
 # 32gb vram, should work, .. maybe
 SKIPGRAM_MAX_PAIRS = 50_000_000
 
@@ -43,7 +43,7 @@ UMAP_RANDOM_STATE = 42
 # Keep OFF by default to preserve each method's native geometry.
 LAYOUT_NORMALIZE_COORDS = False
 LAYOUT_NORMALIZE_METHOD = "percentile"  # percentile | robust | minmax
-LAYOUT_NORMALIZE_LOW = 0.5
+LAYOUT_NORMALIZE_LOW = 0.05
 LAYOUT_NORMALIZE_HIGH = 99.5
 
 # Data URLs

@@ -2,6 +2,9 @@
 Step 4: Train Skip-gram on random walks (GPU) to produce 100D node embeddings.
 Inputs: output/walks.npy (or .parquet), output/node_map.parquet.
 Outputs: output/embeddings.parquet / embeddings.npy (N x 100).
+
+TODO: use streaming pair sampler
+
 """
 import numpy as np
 import pandas as pd
