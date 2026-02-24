@@ -12,3 +12,5 @@ pyarrow>=10.0.0
 numpy>=1.20.0
 tqdm>=4.60.0
 pacmap>=0.7.0
+scikit-learn>=1.0.0
+matplotlib>=3.5.0

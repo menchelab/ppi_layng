@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from config import (
+from config_tune import (
     WALKS_PARQUET,
     NODE_MAP_PARQUET,
     EMBEDDINGS_PARQUET,

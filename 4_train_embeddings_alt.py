@@ -1,7 +1,10 @@
 """
-Step 4: Train Skip-gram on random walks (Optimized for RTX 5090 / Blackwell)
+Step 4: Train Skip-gram on random walks
 Inputs: output/walks.npy, output/node_map.parquet.
 Outputs: output/embeddings.npy (N x 100).
+
+ALTERNATIVE VERSION; TRYING to optimize for RTX 5090 / Blackwell
+reducing sys memory usage, struggling w/ 96GB
 """
 import numpy as np
 import pandas as pd
@@ -11,7 +14,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from pathlib import Path
 
-from config import (
+from config_tune import (
     WALKS_PARQUET,
     NODE_MAP_PARQUET,
     EMBEDDINGS_PARQUET,

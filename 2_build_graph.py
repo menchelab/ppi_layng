@@ -5,7 +5,7 @@ Outputs: output/edge_list.parquet (int src, dst), output/node_map.parquet (int_i
 import pandas as pd
 from tqdm import tqdm
 
-from config import (
+from config_tune import (
     EDGES_TSV,
     GO_OBO_PATH,
     GAF_PATH,

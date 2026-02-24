@@ -1,7 +1,3 @@
-# --- Custom Project Folders ---
-input/
-output/
-data/
 
 # --- Python ---
 __pycache__/

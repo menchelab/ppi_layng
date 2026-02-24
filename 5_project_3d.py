@@ -16,6 +16,7 @@ from config_tune import (
     UMAP_RANDOM_STATE,
 )
 from gpu_check import require_rapids_gpu
+from utils.normalize_layout import normalize_to_cube
 
 
 def main():
@@ -54,10 +55,15 @@ def main():
         pbar.set_postfix_str(f"n={len(emb_protein)}")
         coords_3d = umap.fit_transform(emb_gpu)
         pbar.update(1)
-    # fit_transform may return cupy or numpy
-    if hasattr(coords_3d, "get"):
-        coords_3d = coords_3d.get()
-    coords_3d = np.asarray(coords_3d, dtype=np.float64)
+    # fit_transform may return cudf DataFrame, cupy, or numpy
+    if hasattr(coords_3d, "to_pandas"):
+        coords_3d = np.asarray(coords_3d.to_pandas().values, dtype=np.float64)
+    elif hasattr(coords_3d, "get"):
+        coords_3d = np.asarray(coords_3d.get(), dtype=np.float64)
+    else:
+        coords_3d = np.asarray(coords_3d, dtype=np.float64)
+
+    coords_3d = normalize_to_cube(coords_3d, method="percentile", low=0.5, high=99.5)
 
     # Write layout TSV: node_id, x, y, z
     layout_df = pd.DataFrame({

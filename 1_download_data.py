@@ -1,6 +1,5 @@
 """
 Step 1: Download GO ontology (go-basic.obo) and GAF (goa_human) to data/.
-Validates paths after download. Optional: run GPU check.
 """
 import gzip
 import shutil
@@ -10,7 +9,7 @@ from urllib.request import urlopen
 
 from tqdm import tqdm
 
-from config import DATA_DIR, GO_OBO_PATH, GAF_PATH, GO_OBO_URL, GAF_URL, ensure_dirs
+from config_tune import DATA_DIR, GO_OBO_PATH, GAF_PATH, GO_OBO_URL, GAF_URL, ensure_dirs
 
 CHUNK = 1024 * 1024  # 1 MiB
 

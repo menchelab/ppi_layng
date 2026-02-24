@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from config import (
+from config_tune import (
     EDGE_LIST_PARQUET,
     NODE_MAP_PARQUET,
     WALKS_PARQUET,
@@ -43,15 +43,17 @@ def main():
     # Run node2vec (one walk per start vertex). Returns (vertex_paths, edge_weight_paths).
     with tqdm(total=1, desc="Node2vec random walks", unit=" run", bar_format="{desc}: {bar}{postfix}") as pbar:
         pbar.set_postfix_str(f"{num_walks} walks × {WALK_LENGTH}")
+        # is this different or at a different place in *every* fsckinhg version????
+        # jhgufztdtrsdt trdersarfgh asdf asdf
         result = cugraph.node2vec_random_walks(
             G,
             start_vertices=start_vertices,
             max_depth=WALK_LENGTH,
             p=NODE2VEC_P,
             q=NODE2VEC_Q,
+    # not in this env this version ... FML
     #        compress_result=False,
            random_state=42
-        # seems my version here doesnt have this FML
         )
         pbar.update(1)
     if isinstance(result, tuple):

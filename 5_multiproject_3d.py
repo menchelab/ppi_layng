@@ -15,6 +15,7 @@ from config_tune import (
     UMAP_RANDOM_STATE,
 )
 from gpu_check import require_rapids_gpu
+from utils.normalize_layout import normalize_to_cube
 
 LAYOUT_MULTI_TSV = OUTPUT_DIR / "layout_multi.tsv"
 
@@ -106,9 +107,10 @@ def main():
     layouts.update(run_umap_variants(emb_protein))
     layouts.update(run_pacmap_variants(emb_protein))
 
-    # Build one DataFrame: node_id, x_umap_1, y_umap_1, z_umap_1, ...
+    # Build one DataFrame: node_id, x_umap_1, y_umap_1, z_umap_1, ... (each layout normalized to [-1,1]^3)
     data = {"node_id": protein_str_ids}
     for name, coords in layouts.items():
+        coords = normalize_to_cube(coords, method="percentile", low=0.5, high=99.5)
         data[f"x_{name}"] = coords[:, 0]
         data[f"y_{name}"] = coords[:, 1]
         data[f"z_{name}"] = coords[:, 2]
