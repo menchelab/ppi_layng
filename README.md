@@ -1,4 +1,4 @@
-# PPI 3D layout w/ GO Ontology
+# VERY EXPERIMENTAL - PPI 3D layout w/ GO Ontology
 
 Pipeline for 3D embeddings of large PPI networks (~20k nodes) by fusing the interaction graph with Gene Ontology: unified graph → node2vec walks → skip-gram embeddings → manifold projection (UMAP/PaCMAP) with optional de-compression (hub scaling, LOF denoise, force-directed refinement).
 
@@ -37,6 +37,27 @@ From `edge_list` + `node_map`, infers protein → GO term IDs from annotation ed
 **`8_distribution_charts.py`**  
 Reads the final layout TSV (same precedence as step 7), discovers all `x_*`, `y_*`, `z_*` method columns, and plots one row per method with three density histograms (x, y, z). Writes `output/distribution_charts.png`. Usage: `python 8_distribution_charts.py [layout.tsv]`.
 
+**`10_add_generic_umap_layout.py`**  
+Builds a protein-protein adjacency matrix from `edge_list.parquet`, runs a generic 3D UMAP on that adjacency-feature space, and appends `x_umap_adjacency`, `y_umap_adjacency`, `z_umap_adjacency` to the final TSV for side-by-side comparison. Usage: `python 10_add_generic_umap_layout.py [layout_in.tsv] [layout_out.tsv]`.
+
+**`11_add_generic_pacmap_layout.py`**  
+Builds a protein-protein adjacency matrix from `edge_list.parquet`, runs a regular 3D PaCMAP baseline (non-expansion) on adjacency-derived features, and appends `x_pacmap_adjacency`, `y_pacmap_adjacency`, `z_pacmap_adjacency` to the final TSV. Usage: `python 11_add_generic_pacmap_layout.py [layout_in.tsv] [layout_out.tsv]`.
+
+**`12.1_umap_weighted_concat.py`**  
+Hybrid feature fusion baseline: concatenate standardized model embeddings with standardized adjacency-SVD features using a tunable weight, then run UMAP. Appends `x/y/z_umap_fused_concat_*`. Usage: `python 12.1_umap_weighted_concat.py --weight 0.10`.
+
+**`12.2_umap_late_fusion.py`**  
+Late fusion baseline: run UMAP separately on embeddings and adjacency-SVD, align layouts (Procrustes), then blend in 3D with weight `w`. Appends `x/y/z_umap_fused_lateblend_*`. Usage: `python 12.2_umap_late_fusion.py --weight 0.20`.
+
+**`12.3_umap_distance_fusion.py`**  
+Distance fusion baseline: blend cosine distance matrices from embeddings and adjacency-SVD, then run UMAP with `metric=precomputed`. Appends `x/y/z_umap_fused_distance_*`. Usage: `python 12.3_umap_distance_fusion.py --weight 0.20` (memory-heavy on large N).
+
+**`12.4_umap_graph_diffusion.py`**  
+Topology smoothing baseline: diffuse embeddings over row-normalized PPI adjacency for `steps`, then UMAP. Appends `x/y/z_umap_graph_diffusion_*`. Usage: `python 12.4_umap_graph_diffusion.py --beta 0.80 --steps 2`.
+
+**`12.5_umap_multiview_knn_union.py`**  
+Multi-view graph baseline: build kNN affinity graphs from embeddings and adjacency-SVD, fuse them by weight, reduce via SVD, and run UMAP. Appends `x/y/z_umap_multiview_knn_union_*`. Usage: `python 12.5_umap_multiview_knn_union.py --weight 0.30 --knn 30`.
+
 Coordinate normalization is **config-driven** in `config_tune.py` (`LAYOUT_NORMALIZE_COORDS`, default `False`). Keep it off to preserve native manifold geometry; enable it only for cross-method visual comparability. To check per-method spread and flag collapsed layouts, run `python -m utils.distribution_analysis output/layout_decompression.tsv`.
 
 ---
@@ -47,6 +68,7 @@ Coordinate normalization is **config-driven** in `config_tune.py` (`LAYOUT_NORMA
 - `python -m utils.check_walk_integrity` — validates walk padding, node-0 frequency, unique-node coverage, and per-position invalid rates.
 - `python -m utils.check_embedding_integrity` — checks embedding norms, near-constant dimensions, and sampled cosine-similarity spread.
 - `python -m utils.check_layout_integrity [layout.tsv]` — compares per-method spread, center mass, and sampled nearest-neighbor distances.
+- `python -m utils.pipeline_diagnostics [output/diagnostics_report.md]` — runs all major checks and writes one markdown report.
 
 ---
 

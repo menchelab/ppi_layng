@@ -12,6 +12,7 @@ from config_tune import (
     EDGE_LIST_PARQUET,
     NODE_MAP_PARQUET,
     OUTPUT_DIR,
+    GRAPH_EXCLUDE_TOP_K_GO_TERMS,
     ensure_dirs,
 )
 from gpu_check import require_rapids_gpu
@@ -66,6 +67,50 @@ def load_annotation_edges(gaf_path, protein_set, go_terms):
     return edges
 
 
+def top_k_go_terms_in_gaf(gaf_path, protein_set, go_terms, k):
+    """
+    Return set of top-k most frequent GO IDs among proteins in `protein_set`.
+    Frequency is counted from GAF protein->GO records after GO-term validity filtering.
+    """
+    if int(k) <= 0:
+        return set()
+    COL_DB_OBJECT_ID = 1
+    COL_GO_ID = 4
+    counts = {}
+    with open(gaf_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = tqdm(f, desc=f"Counting GO frequencies (top {k})", unit=" lines")
+        for line in lines:
+            if line.startswith("!"):
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) <= max(COL_DB_OBJECT_ID, COL_GO_ID):
+                continue
+            pid = parts[COL_DB_OBJECT_ID].strip()
+            go_id = parts[COL_GO_ID].strip()
+            if pid in protein_set and go_id in go_terms:
+                counts[go_id] = counts.get(go_id, 0) + 1
+    if not counts:
+        return set()
+    top = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[: int(k)]
+    return {go_id for go_id, _ in top}
+
+
+def filter_annotation_edges_excluding_go_terms(ann_edges, excluded_go_terms):
+    """
+    Remove protein<->term annotation edges for GO terms in `excluded_go_terms`.
+    `ann_edges` is an undirected edge set containing both (protein, term) and (term, protein).
+    """
+    if not excluded_go_terms:
+        return ann_edges
+    excluded = set(excluded_go_terms)
+    out = set()
+    for a, b in ann_edges:
+        if a in excluded or b in excluded:
+            continue
+        out.add((a, b))
+    return out
+
+
 def load_ppi_edges(edges_tsv):
     """Load (source, target) from edges.tsv as undirected pairs."""
     df = pd.read_csv(edges_tsv, sep="\t", usecols=["source", "target"])
@@ -93,6 +138,19 @@ def build_unified_graph():
 
     ann_edges = load_annotation_edges(GAF_PATH, proteins, go_terms)  # has internal tqdm
     print(f"Annotation edges (protein-term, filtered): {len(ann_edges)}")
+
+    top_k = int(GRAPH_EXCLUDE_TOP_K_GO_TERMS)
+    if top_k > 0:
+        excluded_go = top_k_go_terms_in_gaf(GAF_PATH, proteins, go_terms, top_k)
+        before = len(ann_edges)
+        ann_edges = filter_annotation_edges_excluding_go_terms(ann_edges, excluded_go)
+        removed = before - len(ann_edges)
+        print(
+            f"Excluded top-{top_k} generic GO terms: {len(excluded_go)} terms, "
+            f"removed {removed} annotation edges"
+        )
+    else:
+        print("GO generic-term exclusion disabled (GRAPH_EXCLUDE_TOP_K_GO_TERMS=0).")
 
     ppi_edges = load_ppi_edges(EDGES_TSV)
     print(f"PPI edges (undirected pairs): {len(ppi_edges)}")

@@ -22,7 +22,7 @@ LAYOUT_TSV = OUTPUT_DIR / "layout.tsv"
 WALK_LENGTH = 100
 WALKS_PER_NODE = 20
 NODE2VEC_P = 1.0
-NODE2VEC_Q = 1.5   # 1.0 = community; 1.5–2.0 = structural equivalence (better for layout spread?)
+NODE2VEC_Q = 0.5   # 1.0 = community; 1.5–2.0 = structural equivalence (better for layout spread?)
 
 # Embedding - hopefully optimized for RTX 5090
 EMBED_DIM = 100
@@ -33,6 +33,11 @@ SKIPGRAM_NEGATIVE_SAMPLES = 10
 SKIPGRAM_LEARNING_RATE = 0.05 
 # 32gb vram, should work, .. maybe
 SKIPGRAM_MAX_PAIRS = 50_000_000
+
+# Graph construction: optionally remove the most generic GO terms by usage frequency.
+# 0 disables filtering (recommended default for full graph).
+# Example: 20 removes the top-20 most frequent GO IDs in GAF among proteins in edges.tsv.
+GRAPH_EXCLUDE_TOP_K_GO_TERMS = 0
 
 # 3D projection (cuML UMAP)
 UMAP_N_NEIGHBORS = 15
