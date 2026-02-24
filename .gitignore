@@ -1,9 +1,4 @@
-# --- Custom Project Folders ---
-input/
-output/
-data/
-
-# --- Python ---
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -21,28 +16,39 @@ parts/
 sdist/
 var/
 wheels/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
-# --- Virtual Environments ---
-.env
-.venv
-env/
+# Virtual environments
+.venv/
 venv/
 ENV/
-env.bak/
-venv.bak/
+env/
 
-# --- Jupyter Notebooks ---
-.ipynb_checkpoints
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# --- Environment Variables ---
-.env
-.flaskenv
-
-# --- OS Specific ---
+# OS
 .DS_Store
 Thumbs.db
+
+# Environment and secrets
+.env
+.env.local
+*.pem
+
+# Optional: generated output (uncomment if you don't want to track layout files)
+# output/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
