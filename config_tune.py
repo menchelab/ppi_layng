@@ -27,10 +27,10 @@ NODE2VEC_Q = 1.5   # 1.0 = community; 1.5–2.0 = structural equivalence (better
 # Embedding - hopefully optimized for RTX 5090
 EMBED_DIM = 100
 SKIPGRAM_WINDOW = 5
-SKIPGRAM_EPOCHS = 10
+SKIPGRAM_EPOCHS = 4
 SKIPGRAM_BATCH_SIZE = 131072  
 SKIPGRAM_NEGATIVE_SAMPLES = 5
-SKIPGRAM_LEARNING_RATE = 0.001 
+SKIPGRAM_LEARNING_RATE = 0.025 
 # 32gb vram, should work, .. maybe
 SKIPGRAM_MAX_PAIRS = 50_000_000
 
@@ -38,6 +38,13 @@ SKIPGRAM_MAX_PAIRS = 50_000_000
 UMAP_N_NEIGHBORS = 15
 UMAP_MIN_DIST = 0.1
 UMAP_RANDOM_STATE = 42
+
+# Coordinate normalization (for visual comparability across methods).
+# Keep OFF by default to preserve each method's native geometry.
+LAYOUT_NORMALIZE_COORDS = False
+LAYOUT_NORMALIZE_METHOD = "percentile"  # percentile | robust | minmax
+LAYOUT_NORMALIZE_LOW = 0.5
+LAYOUT_NORMALIZE_HIGH = 99.5
 
 # Data URLs
 GO_OBO_URL = "https://current.geneontology.org/ontology/go-basic.obo"

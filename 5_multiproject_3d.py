@@ -13,6 +13,10 @@ from config_tune import (
     NODE_MAP_PARQUET,
     OUTPUT_DIR,
     UMAP_RANDOM_STATE,
+    LAYOUT_NORMALIZE_COORDS,
+    LAYOUT_NORMALIZE_METHOD,
+    LAYOUT_NORMALIZE_LOW,
+    LAYOUT_NORMALIZE_HIGH,
 )
 from gpu_check import require_rapids_gpu
 from utils.normalize_layout import normalize_to_cube
@@ -107,10 +111,16 @@ def main():
     layouts.update(run_umap_variants(emb_protein))
     layouts.update(run_pacmap_variants(emb_protein))
 
-    # Build one DataFrame: node_id, x_umap_1, y_umap_1, z_umap_1, ... (each layout normalized to [-1,1]^3)
+    # Build one DataFrame: node_id, x_umap_1, y_umap_1, z_umap_1, ...
     data = {"node_id": protein_str_ids}
     for name, coords in layouts.items():
-        coords = normalize_to_cube(coords, method="percentile", low=0.5, high=99.5)
+        if LAYOUT_NORMALIZE_COORDS:
+            coords = normalize_to_cube(
+                coords,
+                method=LAYOUT_NORMALIZE_METHOD,
+                low=LAYOUT_NORMALIZE_LOW,
+                high=LAYOUT_NORMALIZE_HIGH,
+            )
         data[f"x_{name}"] = coords[:, 0]
         data[f"y_{name}"] = coords[:, 1]
         data[f"z_{name}"] = coords[:, 2]

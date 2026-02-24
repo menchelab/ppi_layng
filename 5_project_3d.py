@@ -17,6 +17,10 @@ from config_tune import (
     UMAP_N_NEIGHBORS,
     UMAP_MIN_DIST,
     UMAP_RANDOM_STATE,
+    LAYOUT_NORMALIZE_COORDS,
+    LAYOUT_NORMALIZE_METHOD,
+    LAYOUT_NORMALIZE_LOW,
+    LAYOUT_NORMALIZE_HIGH,
 )
 from gpu_check import require_rapids_gpu
 from utils.normalize_layout import normalize_to_cube
@@ -66,7 +70,13 @@ def main():
     else:
         coords_3d = np.asarray(coords_3d, dtype=np.float64)
 
-    coords_3d = normalize_to_cube(coords_3d, method="percentile", low=0.5, high=99.5)
+    if LAYOUT_NORMALIZE_COORDS:
+        coords_3d = normalize_to_cube(
+            coords_3d,
+            method=LAYOUT_NORMALIZE_METHOD,
+            low=LAYOUT_NORMALIZE_LOW,
+            high=LAYOUT_NORMALIZE_HIGH,
+        )
 
     # Write layout TSV: node_id, x, y, z
     layout_df = pd.DataFrame({

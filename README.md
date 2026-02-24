@@ -37,7 +37,16 @@ From `edge_list` + `node_map`, infers protein → GO term IDs from annotation ed
 **`8_distribution_charts.py`**  
 Reads the final layout TSV (same precedence as step 7), discovers all `x_*`, `y_*`, `z_*` method columns, and plots one row per method with three density histograms (x, y, z). Writes `output/distribution_charts.png`. Usage: `python 8_distribution_charts.py [layout.tsv]`.
 
-Layout coordinates from steps 5 and 6 are **normalized to [-1, 1]³** (percentile-based per axis) so all methods use the same scale and collapsed “ball” layouts are stretched for comparison. To check per-method spread and flag collapsed layouts, run `python -m utils.distribution_analysis output/layout_decompression.tsv`.
+Coordinate normalization is **config-driven** in `config_tune.py` (`LAYOUT_NORMALIZE_COORDS`, default `False`). Keep it off to preserve native manifold geometry; enable it only for cross-method visual comparability. To check per-method spread and flag collapsed layouts, run `python -m utils.distribution_analysis output/layout_decompression.tsv`.
+
+---
+
+## Integrity helper scripts
+
+- `python -m utils.check_graph_integrity` — validates node/edge type counts, annotation coverage, and degree structure from `edge_list` + `node_map`.
+- `python -m utils.check_walk_integrity` — validates walk padding, node-0 frequency, unique-node coverage, and per-position invalid rates.
+- `python -m utils.check_embedding_integrity` — checks embedding norms, near-constant dimensions, and sampled cosine-similarity spread.
+- `python -m utils.check_layout_integrity [layout.tsv]` — compares per-method spread, center mass, and sampled nearest-neighbor distances.
 
 ---
 
