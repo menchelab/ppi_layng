@@ -10,6 +10,8 @@ Output (same directory as input edges TSV):
          + x_adjp<n>, y_adjp<n>, z_adjp<n> (PaCMAP runs)
          + x_adjt<n>, y_adjt<n>, z_adjt<n> (TriMAP runs)
          + x_adjh<n>, y_adjh<n>, z_adjh<n> (PHATE runs)
+         + x_adjf<n>, y_adjf<n>, z_adjf<n> (ForceAtlas2 runs)
+         + x_adjs<n>, y_adjs<n>, z_adjs<n> (spring runs)
   - umap_runs.tsv: one row per run with algo + parameter settings
 
 Usage:
@@ -25,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import sparse
+from scipy.sparse import csgraph
 from sklearn.decomposition import TruncatedSVD
 from sklearn.manifold import trustworthiness
 
@@ -46,6 +49,16 @@ def parse_args():
         "--no-trimap",
         action="store_true",
         help="Skip TriMAP (adjt) layout variants.",
+    )
+    parser.add_argument(
+        "--no-forceatlas2",
+        action="store_true",
+        help="Skip ForceAtlas2 (adjf) layout variants.",
+    )
+    parser.add_argument(
+        "--no-spring",
+        action="store_true",
+        help="Skip spring (adjs) layout variants.",
     )
     return parser.parse_args()
 
@@ -139,6 +152,78 @@ def _merge_layout_with_ring(
     full[connected_mask] = coords_connected
     if n_isolated > 0:
         full[isolated_mask] = _place_isolated_ring(coords_connected, n_isolated)
+    return full
+
+
+def _merge_force_layout_concentric(
+    coords_connected: np.ndarray,
+    A_layout: sparse.csr_matrix,
+    connected_mask: np.ndarray,
+    isolated_mask: np.ndarray,
+    inner_radius_frac: float = 0.85,
+    outer_radius_frac: float = 1.3,
+) -> np.ndarray:
+    """
+    Merge force-directed layout with concentric rings: main component center,
+    isolated nodes on inner ring, small connected components on outer ring.
+    """
+    n_connected = coords_connected.shape[0]
+    n_total = len(connected_mask)
+    n_isolated = int(isolated_mask.sum())
+    full = np.zeros((n_total, 3), dtype=np.float64)
+
+    if n_connected == 0:
+        if n_isolated > 0:
+            full[isolated_mask] = _place_isolated_ring(np.zeros((0, 3)), n_isolated)
+        return full
+
+    # Find connected components (in A_layout index space: 0..n_connected-1)
+    n_comp, labels = csgraph.connected_components(A_layout, directed=False)
+    comp_ids = [np.where(labels == c)[0] for c in range(n_comp)]
+    comp_sizes = [len(ids) for ids in comp_ids]
+    main_idx = int(np.argmax(comp_sizes))
+    main_ids = comp_ids[main_idx]
+    small_comp_ids = [ids for i, ids in enumerate(comp_ids) if i != main_idx and len(ids) > 0]
+
+    # Base radius from main component only
+    main_coords = coords_connected[main_ids]
+    cen = np.mean(main_coords, axis=0)
+    radii = np.linalg.norm(main_coords - cen, axis=1)
+    base_radius = float(np.percentile(radii[radii > 0] if np.any(radii > 0) else [1.0], 95))
+    if base_radius < 1e-6:
+        base_radius = 1.0
+    r_inner = base_radius * inner_radius_frac
+    r_outer = base_radius * outer_radius_frac
+
+    # Main component: keep layout, optionally recenter
+    full[connected_mask] = coords_connected
+
+    # Small components: place each centroid on outer ring, translate
+    if small_comp_ids:
+        n_small = len(small_comp_ids)
+        angles = np.linspace(0, 2 * np.pi, n_small, endpoint=False)
+        for k, ids in enumerate(small_comp_ids):
+            comp_coords = coords_connected[ids]
+            comp_cen = np.mean(comp_coords, axis=0)
+            target = cen + np.array([
+                r_outer * np.cos(angles[k]),
+                r_outer * np.sin(angles[k]),
+                0.0,
+            ])
+            # Translate component so centroid -> target
+            shift = target - comp_cen
+            full[np.flatnonzero(connected_mask)[ids]] = comp_coords + shift
+
+    # Isolated: inner ring (same plane as main)
+    if n_isolated > 0:
+        angles = np.linspace(0, 2 * np.pi, n_isolated, endpoint=False)
+        inner_ring = np.column_stack([
+            cen[0] + r_inner * np.cos(angles),
+            cen[1] + r_inner * np.sin(angles),
+            np.full(n_isolated, cen[2]),
+        ]).astype(np.float64)
+        full[isolated_mask] = inner_ring
+
     return full
 
 
@@ -313,6 +398,78 @@ def run_phate_variant(
     return best["coords"], total_seconds, best["seed"], best["trustworthiness"], len(X_unique)
 
 
+def _build_nx_graph_from_adjacency(A: sparse.csr_matrix) -> "nx.Graph":
+    """Build undirected NetworkX graph from sparse adjacency matrix."""
+    import networkx as nx
+
+    G = nx.Graph()
+    n = A.shape[0]
+    G.add_nodes_from(range(n))
+    rows, cols = A.nonzero()
+    for i, j in zip(rows, cols):
+        if i < j:  # undirected: add each edge once
+            G.add_edge(i, j, weight=float(A[i, j]))
+    return G
+
+
+def run_forceatlas2_variant(
+    A: sparse.csr_matrix,
+    max_iter: int,
+    gravity: float,
+    scaling_ratio: float,
+    random_state: int | None,
+) -> tuple[np.ndarray, float]:
+    """Run ForceAtlas2 layout on adjacency matrix. Returns (coords, seconds)."""
+    try:
+        import networkx as nx
+    except ImportError as e:
+        raise RuntimeError("Please install networkx: pip install networkx") from e
+
+    G = _build_nx_graph_from_adjacency(A)
+    if G.number_of_edges() == 0:
+        # Disconnected/empty: return random init
+        rng = np.random.default_rng(42 if random_state is None else random_state)
+        n = A.shape[0]
+        coords = rng.standard_normal((n, 3)).astype(np.float64)
+        return coords, 0.0
+
+    rs = None if random_state is None else int(random_state)
+    t0 = time.time()
+    pos = nx.forceatlas2_layout(G, dim=3, max_iter=max_iter, gravity=gravity, scaling_ratio=scaling_ratio, seed=rs)
+    layout_s = time.time() - t0
+    n = G.number_of_nodes()
+    coords = np.array([[pos[i][0], pos[i][1], pos[i][2]] for i in range(n)], dtype=np.float64)
+    return coords, layout_s
+
+
+def run_spring_variant(
+    A: sparse.csr_matrix,
+    iterations: int,
+    k: float | None,
+    random_state: int | None,
+) -> tuple[np.ndarray, float]:
+    """Run Fruchterman-Reingold spring layout on adjacency matrix. Returns (coords, seconds)."""
+    try:
+        import networkx as nx
+    except ImportError as e:
+        raise RuntimeError("Please install networkx: pip install networkx") from e
+
+    G = _build_nx_graph_from_adjacency(A)
+    if G.number_of_edges() == 0:
+        rng = np.random.default_rng(42 if random_state is None else random_state)
+        n = A.shape[0]
+        coords = rng.standard_normal((n, 3)).astype(np.float64)
+        return coords, 0.0
+
+    rs = None if random_state is None else int(random_state)
+    t0 = time.time()
+    pos = nx.spring_layout(G, dim=3, iterations=iterations, k=k, seed=rs)
+    layout_s = time.time() - t0
+    n = G.number_of_nodes()
+    coords = np.array([[pos[i][0], pos[i][1], pos[i][2]] for i in range(n)], dtype=np.float64)
+    return coords, layout_s
+
+
 def main():
     args = parse_args()
     edges_tsv = Path(args.edges_tsv).expanduser().resolve()
@@ -403,6 +560,16 @@ def main():
         {"run_id": 1, "knn": 30, "t": 50, "decay": 60, "gamma": 0.5},
         {"run_id": 2, "knn": 60, "t": 65, "decay": 80, "gamma": 0.5},
         {"run_id": 3, "knn": 100, "t": 100, "decay": 100, "gamma": 0.5},
+    ]
+    forceatlas2_variants = [
+        {"run_id": 1, "max_iter": 200, "gravity": 0.5, "scaling_ratio": 2.0},
+        {"run_id": 2, "max_iter": 500, "gravity": 1.0, "scaling_ratio": 2.0},
+        {"run_id": 3, "max_iter": 1000, "gravity": 0.5, "scaling_ratio": 2.5},
+        {"run_id": 4, "max_iter": 1500, "gravity": 1.0, "scaling_ratio": 2.5},
+    ]
+    spring_variants = [
+        {"run_id": 1, "iterations": 200, "k": None},
+        {"run_id": 2, "iterations": 500, "k": None},
     ]
 
     nodes_df = pd.DataFrame({"id": node_ids})
@@ -571,8 +738,74 @@ def main():
                 }
             )
 
+    if not args.no_forceatlas2:
+        for v in forceatlas2_variants:
+            run_id = int(v["run_id"])
+            print(f"\n=== ForceAtlas2 Run {run_id} ===")
+            print(v)
+            if all_isolated:
+                coords = _get_layout_coords(None)
+                layout_s = 0.0
+            else:
+                coords, layout_s = run_forceatlas2_variant(
+                    A=A_layout,
+                    max_iter=v["max_iter"],
+                    gravity=v["gravity"],
+                    scaling_ratio=v["scaling_ratio"],
+                    random_state=random_state,
+                )
+                coords = _merge_force_layout_concentric(
+                    coords, A_layout, connected_mask, isolated_mask
+                )
+            nodes_df[f"x_adjf{run_id}"] = coords[:, 0]
+            nodes_df[f"y_adjf{run_id}"] = coords[:, 1]
+            nodes_df[f"z_adjf{run_id}"] = coords[:, 2]
+            run_rows.append(
+                {
+                    "algo": "forceatlas2",
+                    "run_id": run_id,
+                    "max_iter": int(v["max_iter"]),
+                    "gravity": float(v["gravity"]),
+                    "scaling_ratio": float(v["scaling_ratio"]),
+                    "random_state": "" if random_state is None else int(random_state),
+                    "layout_seconds": round(float(layout_s), 3),
+                }
+            )
+
+    if not args.no_spring:
+        for v in spring_variants:
+            run_id = int(v["run_id"])
+            print(f"\n=== Spring Run {run_id} ===")
+            print(v)
+            if all_isolated:
+                coords = _get_layout_coords(None)
+                layout_s = 0.0
+            else:
+                coords, layout_s = run_spring_variant(
+                    A=A_layout,
+                    iterations=v["iterations"],
+                    k=v.get("k"),
+                    random_state=random_state,
+                )
+                coords = _merge_force_layout_concentric(
+                    coords, A_layout, connected_mask, isolated_mask
+                )
+            nodes_df[f"x_adjs{run_id}"] = coords[:, 0]
+            nodes_df[f"y_adjs{run_id}"] = coords[:, 1]
+            nodes_df[f"z_adjs{run_id}"] = coords[:, 2]
+            run_rows.append(
+                {
+                    "algo": "spring",
+                    "run_id": run_id,
+                    "iterations": int(v["iterations"]),
+                    "k": v.get("k"),
+                    "random_state": "" if random_state is None else int(random_state),
+                    "layout_seconds": round(float(layout_s), 3),
+                }
+            )
+
     nodes_df.to_csv(nodes_out, sep="\t", index=False)
-    pd.DataFrame(run_rows).sort_values("run_id").to_csv(runs_out, sep="\t", index=False)
+    pd.DataFrame(run_rows).sort_values(["algo", "run_id"]).to_csv(runs_out, sep="\t", index=False)
 
     print(f"\nWrote {nodes_out}")
     print(f"Wrote {runs_out}")

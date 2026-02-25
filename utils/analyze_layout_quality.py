@@ -123,8 +123,15 @@ def metric_row(name: str, X: np.ndarray):
 
 
 def parse_layout_run_id(layout_name: str):
-    # adju10 / adjp4 / adjt2 / adjh3
-    for pref, algo in [("adju", "umap"), ("adjp", "pacmap"), ("adjt", "trimap"), ("adjh", "phate")]:
+    # adju10 / adjp4 / adjt2 / adjh3 / adjf4 / adjs2
+    for pref, algo in [
+        ("adju", "umap"),
+        ("adjp", "pacmap"),
+        ("adjt", "trimap"),
+        ("adjh", "phate"),
+        ("adjf", "forceatlas2"),
+        ("adjs", "spring"),
+    ]:
         if layout_name.startswith(pref):
             rid = layout_name[len(pref):]
             if rid.isdigit():

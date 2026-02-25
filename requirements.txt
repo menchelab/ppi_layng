@@ -7,6 +7,7 @@
 #   pip install -r requirements-go2vec.txt
 
 obonet>=1.1.0
+networkx>=3.4.0
 pandas>=1.5.0
 pyarrow>=10.0.0
 numpy>=1.20.0
