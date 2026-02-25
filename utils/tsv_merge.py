@@ -39,7 +39,10 @@ def main():
         right_key = id_extra
 
     merged = df_main.merge(df_extra, left_on=id_main, right_on=right_key, how="left")
-    merged = merged.drop(columns=[right_key])
+    # Only drop the right key when it's a separate column (duplicate). When id_main == id_extra
+    # and no postfix, both keys have the same name and pandas keeps a single column - don't drop it.
+    if right_key in merged.columns and right_key != id_main:
+        merged = merged.drop(columns=[right_key])
     merged.to_csv(path_out, sep="\t", index=False)
     print(f"Wrote {path_out} ({len(merged)} rows, {len(merged.columns)} columns)")
 

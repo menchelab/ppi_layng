@@ -2,12 +2,12 @@
 Apply ForceAtlas-like postprocessing to selected layouts in a nodes/layout TSV.
 
 Usage:
-  python -m utils.postprocess_apply_layouts <nodes.tsv> <recommendations.tsv> <layout1> [layout2 ...]
+  python -m utils.postprocess_apply_layouts <nodes.tsv> <recommendations.tsv> [layout1 layout2 ...]
 
 Positional args:
   argv1: nodes/layout TSV containing x_<layout>, y_<layout>, z_<layout> columns.
   argv2: recommendation TSV from utils.postprocess_analyze_layouts.py
-  argv3+: layout names to postprocess (e.g. adju1 adju2 adjp3)
+  argv3+: layout names to postprocess (e.g. adju1 adju2 adjp3). If omitted, runs for all layouts in recommendations.
 
 Behavior:
   - For each selected layout name L, reads recommended parameters from recommendations TSV
@@ -31,7 +31,11 @@ def parse_args():
     p = argparse.ArgumentParser(description="Apply recommended postprocessing to selected layouts.")
     p.add_argument("nodes_tsv", type=str, help="Input nodes/layout TSV.")
     p.add_argument("recommendations_tsv", type=str, help="TSV from postprocess_analyze_layouts.py")
-    p.add_argument("layouts", nargs="+", help="Layout names to process (without x_/y_/z_ prefix).")
+    p.add_argument(
+        "layouts",
+        nargs="*",
+        help="Layout names to process (without x_/y_/z_ prefix). If omitted, process all layouts in recommendations.",
+    )
     p.add_argument(
         "--out",
         type=str,
@@ -63,6 +67,40 @@ def _get_rec_row(rec_df: pd.DataFrame, layout_name: str):
     return m.iloc[0]
 
 
+def _rec_val(rec, key: str, default):
+    if key not in rec.index:
+        return default
+    v = rec[key]
+    if pd.isna(v):
+        return default
+    return v
+
+
+def _to_bool(v, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in {"1", "true", "yes", "y", "t"}:
+        return True
+    if s in {"0", "false", "no", "n", "f", ""}:
+        return False
+    return default
+
+
+def _to_optional_float(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in {"", "none", "nan"}:
+        return None
+    x = float(v)
+    if not np.isfinite(x):
+        return None
+    return x
+
+
 def main():
     args = parse_args()
     nodes_path = Path(args.nodes_tsv)
@@ -79,10 +117,12 @@ def main():
     if "layout" not in rec_df.columns:
         raise ValueError(f"{rec_path} must contain a 'layout' column.")
 
+    layouts = args.layouts if args.layouts else rec_df["layout"].unique().tolist()
+
     applied = 0
     skipped = []
 
-    pbar = tqdm(args.layouts, desc="Applying postprocess", unit=" layout")
+    pbar = tqdm(layouts, desc="Applying postprocess", unit=" layout")
     for layout_name in pbar:
         pbar.set_postfix_str(layout_name)
         xcol, ycol, zcol = f"x_{layout_name}", f"y_{layout_name}", f"z_{layout_name}"
@@ -118,9 +158,19 @@ def main():
             X,
             iterations=int(rec["iterations"]),
             repulsion_strength=float(rec["repulsion_strength"]),
+            step_size=float(_rec_val(rec, "step_size", 0.1)),
             min_dist=1e-3,
             use_knn=True,
             k_repel=int(rec["k_repel"]),
+            anchor_strength=float(_rec_val(rec, "anchor_strength", 0.0)),
+            max_step_factor=float(_rec_val(rec, "max_step_factor", 0.0)),
+            dense_only_quantile=_to_optional_float(_rec_val(rec, "dense_only_quantile", None)),
+            two_phase=_to_bool(_rec_val(rec, "two_phase", False)),
+            phase_split=float(_rec_val(rec, "phase_split", 0.35)),
+            phase1_strength_mult=float(_rec_val(rec, "phase1_strength_mult", 1.5)),
+            phase2_strength_mult=float(_rec_val(rec, "phase2_strength_mult", 0.6)),
+            early_stop_patience=int(_rec_val(rec, "early_stop_patience", 0)),
+            early_stop_min_improve=float(_rec_val(rec, "early_stop_min_improve", 1e-4)),
             random_state=int(args.seed),
         )
         if not np.isfinite(Xp).all():

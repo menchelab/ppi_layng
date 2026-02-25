@@ -37,6 +37,16 @@ def parse_args():
         action="store_true",
         help="Disable random_state for faster non-deterministic runs.",
     )
+    parser.add_argument(
+        "--no-phate",
+        action="store_true",
+        help="Skip PHATE (adjh) layout variants.",
+    )
+    parser.add_argument(
+        "--no-trimap",
+        action="store_true",
+        help="Skip TriMAP (adjt) layout variants.",
+    )
     return parser.parse_args()
 
 
@@ -64,6 +74,72 @@ def build_adjacency(edges_tsv: Path):
     A.setdiag(0.0)
     A.eliminate_zeros()
     return A, node_ids
+
+
+def _load_extra_nodes_from_nodes_orig(edges_tsv: Path, node_ids_from_edges: np.ndarray) -> np.ndarray:
+    """Load nodes from nodes_orig.tsv in same dir; return extra ids not in edges. Empty if no file."""
+    nodes_orig_path = edges_tsv.parent / "nodes_orig.tsv"
+    if not nodes_orig_path.exists():
+        return np.array([], dtype=node_ids_from_edges.dtype)
+    df = pd.read_csv(nodes_orig_path, sep="\t")
+    if "id" not in df.columns:
+        return np.array([], dtype=node_ids_from_edges.dtype)
+    ids_orig = df["id"].astype(str).to_numpy()
+    ids_set = set(node_ids_from_edges.astype(str))
+    extra = np.array([x for x in np.unique(ids_orig) if x not in ids_set], dtype=object)
+    return extra
+
+
+def _expand_adjacency_for_extra_nodes(
+    A: sparse.csr_matrix, node_ids_edges: np.ndarray, node_ids_extra: np.ndarray
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """Expand A to include extra nodes (no edges). Returns (A_expanded, node_ids_all)."""
+    if len(node_ids_extra) == 0:
+        return A, node_ids_edges
+    n_edges = len(node_ids_edges)
+    n_total = n_edges + len(node_ids_extra)
+    node_ids_all = np.concatenate([node_ids_edges, np.sort(node_ids_extra)])
+    # Expand sparse matrix: keep original entries, new rows/cols stay zero
+    Ac = A.tocoo()
+    A_exp = sparse.coo_matrix(
+        (Ac.data, (Ac.row, Ac.col)), shape=(n_total, n_total), dtype=A.dtype
+    ).tocsr()
+    A_exp.eliminate_zeros()
+    return A_exp, node_ids_all
+
+
+def _place_isolated_ring(coords_connected: np.ndarray, n_isolated: int) -> np.ndarray:
+    """Place n_isolated points on a ring around the centroid of coords_connected."""
+    if n_isolated == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    if len(coords_connected) == 0:
+        angles = np.linspace(0, 2 * np.pi, n_isolated, endpoint=False)
+        return np.column_stack([np.cos(angles), np.sin(angles), np.zeros(n_isolated)]).astype(np.float64)
+    cen = np.mean(coords_connected, axis=0)
+    radii = np.linalg.norm(coords_connected - cen, axis=1)
+    radius = float(np.percentile(radii[radii > 0] if np.any(radii > 0) else [1.0], 95)) * 1.2
+    angles = np.linspace(0, 2 * np.pi, n_isolated, endpoint=False)
+    ring = np.column_stack([
+        cen[0] + radius * np.cos(angles),
+        cen[1] + radius * np.sin(angles),
+        np.full(n_isolated, cen[2]),
+    ])
+    return ring.astype(np.float64)
+
+
+def _merge_layout_with_ring(
+    coords_connected: np.ndarray,
+    connected_mask: np.ndarray,
+    isolated_mask: np.ndarray,
+) -> np.ndarray:
+    """Merge layout coords (connected only) with ring positions for isolated nodes."""
+    n_total = len(connected_mask)
+    n_isolated = int(isolated_mask.sum())
+    full = np.zeros((n_total, 3), dtype=np.float64)
+    full[connected_mask] = coords_connected
+    if n_isolated > 0:
+        full[isolated_mask] = _place_isolated_ring(coords_connected, n_isolated)
+    return full
 
 
 def run_umap_variant(
@@ -250,71 +326,113 @@ def main():
     use_seed = not args.no_seed
     random_state = 42 if use_seed else None
 
+    BOLD_RED = "\033[1;31m"
+    RESET = "\033[0m"
+
     print(f"Reading edges: {edges_tsv}")
     A, node_ids = build_adjacency(edges_tsv)
+    extra_ids = _load_extra_nodes_from_nodes_orig(edges_tsv, node_ids)
+    if len(extra_ids) > 0:
+        print(f"{BOLD_RED}nodes_orig.tsv: {len(extra_ids)} extra nodes (no edges) added{RESET}")
+        A, node_ids = _expand_adjacency_for_extra_nodes(A, node_ids, extra_ids)
     print(f"Nodes: {len(node_ids)} | A shape: {A.shape} | nnz: {A.nnz}")
     if random_state is None:
         print("Running without fixed seed (faster, non-deterministic).")
     else:
         print(f"Running with fixed seed random_state={random_state}.")
 
-    # Highest-quality visual comparison sweep:
-    # Keep SVD fixed (same adjacency features for all runs) and vary manifold params.
-    fixed_svd_dim = 384
-    d = max(8, min(int(fixed_svd_dim), A.shape[0] - 1))
-    t_svd0 = time.time()
-    X_svd = TruncatedSVD(n_components=d, random_state=random_state).fit_transform(A).astype(np.float32)
-    svd_seconds_shared = time.time() - t_svd0
-    print(f"Shared SVD done: dim={d}, seconds={svd_seconds_shared:.3f}")
+    # Split connected vs isolated (degree 0). Run layout only on connected; place isolated on ring.
+    degree = np.array(A.sum(axis=1)).flatten()
+    connected_mask = degree > 0
+    isolated_mask = ~connected_mask
+    n_connected = int(connected_mask.sum())
+    n_isolated = int(isolated_mask.sum())
+    if n_isolated > 0:
+        print(f"Layout on {n_connected} connected nodes; {n_isolated} isolated → ring around layout")
+        A_layout = A[connected_mask][:, connected_mask]
+    else:
+        A_layout = A
 
+    fixed_svd_dim = 384
+    all_isolated = n_connected == 0
+    if all_isolated:
+        X_svd = np.zeros((0, 8), dtype=np.float32)
+        svd_seconds_shared = 0.0
+        d = 8
+        print("All nodes isolated; placing on ring (no layout).")
+    else:
+        d = min(
+            max(8, min(int(fixed_svd_dim), A_layout.shape[0] - 1)),
+            A_layout.shape[0],
+            A_layout.shape[1],
+        )
+        t_svd0 = time.time()
+        X_svd = TruncatedSVD(n_components=d, random_state=random_state).fit_transform(A_layout).astype(np.float32)
+        svd_seconds_shared = time.time() - t_svd0
+        print(f"Shared SVD done: dim={d}, seconds={svd_seconds_shared:.3f}")
+
+    # Longer runs for quality: n_epochs roughly 2x previous defaults.
     variants = [
-        {"run_id": 1, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "metric": "cosine", "n_epochs": 1200, "repulsion_strength": 1.5, "negative_sample_rate": 12},
-        {"run_id": 2, "svd_dim": fixed_svd_dim, "n_neighbors": 35, "min_dist": 0.02, "metric": "cosine", "n_epochs": 1500, "repulsion_strength": 1.7, "negative_sample_rate": 15},
-        {"run_id": 3, "svd_dim": fixed_svd_dim, "n_neighbors": 50, "min_dist": 0.03, "metric": "cosine", "n_epochs": 1800, "repulsion_strength": 1.9, "negative_sample_rate": 18},
-        {"run_id": 4, "svd_dim": fixed_svd_dim, "n_neighbors": 70, "min_dist": 0.05, "metric": "cosine", "n_epochs": 2200, "repulsion_strength": 2.0, "negative_sample_rate": 20},
-        {"run_id": 5, "svd_dim": fixed_svd_dim, "n_neighbors": 90, "min_dist": 0.08, "metric": "cosine", "n_epochs": 2600, "repulsion_strength": 2.2, "negative_sample_rate": 24},
-        {"run_id": 6, "svd_dim": fixed_svd_dim, "n_neighbors": 120, "min_dist": 0.12, "metric": "cosine", "n_epochs": 3000, "repulsion_strength": 2.4, "negative_sample_rate": 28},
-        {"run_id": 7, "svd_dim": fixed_svd_dim, "n_neighbors": 40, "min_dist": 0.02, "metric": "euclidean", "n_epochs": 1800, "repulsion_strength": 1.8, "negative_sample_rate": 16},
-        {"run_id": 8, "svd_dim": fixed_svd_dim, "n_neighbors": 80, "min_dist": 0.08, "metric": "euclidean", "n_epochs": 2400, "repulsion_strength": 2.0, "negative_sample_rate": 22},
-        {"run_id": 9, "svd_dim": fixed_svd_dim, "n_neighbors": 140, "min_dist": 0.15, "metric": "euclidean", "n_epochs": 3200, "repulsion_strength": 2.4, "negative_sample_rate": 30},
-        {"run_id": 10, "svd_dim": fixed_svd_dim, "n_neighbors": 200, "min_dist": 0.20, "metric": "cosine", "n_epochs": 3600, "repulsion_strength": 2.6, "negative_sample_rate": 35},
+        {"run_id": 1, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "metric": "cosine", "n_epochs": 2400, "repulsion_strength": 1.5, "negative_sample_rate": 12},
+        {"run_id": 2, "svd_dim": fixed_svd_dim, "n_neighbors": 35, "min_dist": 0.02, "metric": "cosine", "n_epochs": 3000, "repulsion_strength": 1.7, "negative_sample_rate": 15},
+        {"run_id": 3, "svd_dim": fixed_svd_dim, "n_neighbors": 50, "min_dist": 0.03, "metric": "cosine", "n_epochs": 3600, "repulsion_strength": 1.9, "negative_sample_rate": 18},
+        {"run_id": 4, "svd_dim": fixed_svd_dim, "n_neighbors": 70, "min_dist": 0.05, "metric": "cosine", "n_epochs": 4400, "repulsion_strength": 2.0, "negative_sample_rate": 20},
+        {"run_id": 5, "svd_dim": fixed_svd_dim, "n_neighbors": 90, "min_dist": 0.08, "metric": "cosine", "n_epochs": 5200, "repulsion_strength": 2.2, "negative_sample_rate": 24},
+        {"run_id": 6, "svd_dim": fixed_svd_dim, "n_neighbors": 120, "min_dist": 0.12, "metric": "cosine", "n_epochs": 6000, "repulsion_strength": 2.4, "negative_sample_rate": 28},
+        {"run_id": 7, "svd_dim": fixed_svd_dim, "n_neighbors": 40, "min_dist": 0.02, "metric": "euclidean", "n_epochs": 3600, "repulsion_strength": 1.8, "negative_sample_rate": 16},
+        {"run_id": 8, "svd_dim": fixed_svd_dim, "n_neighbors": 80, "min_dist": 0.08, "metric": "euclidean", "n_epochs": 4800, "repulsion_strength": 2.0, "negative_sample_rate": 22},
+        {"run_id": 9, "svd_dim": fixed_svd_dim, "n_neighbors": 140, "min_dist": 0.15, "metric": "euclidean", "n_epochs": 6400, "repulsion_strength": 2.4, "negative_sample_rate": 30},
+        {"run_id": 10, "svd_dim": fixed_svd_dim, "n_neighbors": 200, "min_dist": 0.20, "metric": "cosine", "n_epochs": 7200, "repulsion_strength": 2.6, "negative_sample_rate": 35},
     ]
     pacmap_variants = [
-        {"run_id": 1, "n_neighbors": 20, "mn_ratio": 0.5, "fp_ratio": 1.5, "n_iters": 800},
-        {"run_id": 2, "n_neighbors": 40, "mn_ratio": 0.6, "fp_ratio": 2.0, "n_iters": 1000},
-        {"run_id": 3, "n_neighbors": 60, "mn_ratio": 0.7, "fp_ratio": 2.0, "n_iters": 1200},
-        {"run_id": 4, "n_neighbors": 80, "mn_ratio": 0.8, "fp_ratio": 2.5, "n_iters": 1500},
-        {"run_id": 5, "n_neighbors": 120, "mn_ratio": 0.9, "fp_ratio": 3.0, "n_iters": 1800},
+        {"run_id": 1, "n_neighbors": 20, "mn_ratio": 0.5, "fp_ratio": 1.5, "n_iters": 1600},
+        {"run_id": 2, "n_neighbors": 40, "mn_ratio": 0.6, "fp_ratio": 2.0, "n_iters": 2000},
+        {"run_id": 3, "n_neighbors": 60, "mn_ratio": 0.7, "fp_ratio": 2.0, "n_iters": 2400},
+        {"run_id": 4, "n_neighbors": 80, "mn_ratio": 0.8, "fp_ratio": 2.5, "n_iters": 3000},
+        {"run_id": 5, "n_neighbors": 120, "mn_ratio": 0.9, "fp_ratio": 3.0, "n_iters": 3600},
     ]
     trimap_variants = [
-        {"run_id": 1, "n_inliers": 10, "n_outliers": 5, "n_random": 5, "n_iters": 800},
-        {"run_id": 2, "n_inliers": 20, "n_outliers": 10, "n_random": 10, "n_iters": 1200},
-        {"run_id": 3, "n_inliers": 30, "n_outliers": 15, "n_random": 10, "n_iters": 1600},
+        {"run_id": 1, "n_inliers": 10, "n_outliers": 5, "n_random": 5, "n_iters": 1600},
+        {"run_id": 2, "n_inliers": 20, "n_outliers": 10, "n_random": 10, "n_iters": 2400},
+        {"run_id": 3, "n_inliers": 30, "n_outliers": 15, "n_random": 10, "n_iters": 3200},
     ]
-    # Quality-focused PHATE sweep with explicit diffusion scales.
+    # Quality-focused PHATE sweep. Low t causes line collapse; higher t + gamma=0.5 gives 3D spread.
+    # adjh1/adjh2: raised t and gamma=0.5 to avoid "everything on one line".
+    # adjh3: raised t to spread hotspots; postprocess_apply_layouts can further refine.
     phate_variants = [
-        {"run_id": 1, "knn": 30, "t": 20, "decay": 60, "gamma": 1.0},
-        {"run_id": 2, "knn": 60, "t": 40, "decay": 80, "gamma": 1.0},
-        {"run_id": 3, "knn": 100, "t": 80, "decay": 100, "gamma": 0.5},
+        {"run_id": 1, "knn": 30, "t": 50, "decay": 60, "gamma": 0.5},
+        {"run_id": 2, "knn": 60, "t": 65, "decay": 80, "gamma": 0.5},
+        {"run_id": 3, "knn": 100, "t": 100, "decay": 100, "gamma": 0.5},
     ]
 
     nodes_df = pd.DataFrame({"id": node_ids})
     run_rows = []
 
+    def _get_layout_coords(coords_connected: np.ndarray) -> np.ndarray:
+        """Merge layout with ring for isolated nodes; handle all-isolated case."""
+        if all_isolated:
+            return _place_isolated_ring(np.zeros((0, 3)), len(node_ids))
+        return _merge_layout_with_ring(coords_connected, connected_mask, isolated_mask)
+
     for v in variants:
         run_id = int(v["run_id"])
         print(f"\n=== Run {run_id} ===")
         print(v)
-        coords, layout_s = run_umap_variant(
-            X=X_svd,
-            n_neighbors=v["n_neighbors"],
-            min_dist=v["min_dist"],
-            metric=v["metric"],
-            n_epochs=v["n_epochs"],
-            repulsion_strength=v["repulsion_strength"],
-            negative_sample_rate=v["negative_sample_rate"],
-            random_state=random_state,
-        )
+        if all_isolated:
+            coords = _get_layout_coords(None)
+            layout_s = 0.0
+        else:
+            coords, layout_s = run_umap_variant(
+                X=X_svd,
+                n_neighbors=v["n_neighbors"],
+                min_dist=v["min_dist"],
+                metric=v["metric"],
+                n_epochs=v["n_epochs"],
+                repulsion_strength=v["repulsion_strength"],
+                negative_sample_rate=v["negative_sample_rate"],
+                random_state=random_state,
+            )
+            coords = _get_layout_coords(coords)
 
         nodes_df[f"x_adju{run_id}"] = coords[:, 0]
         nodes_df[f"y_adju{run_id}"] = coords[:, 1]
@@ -341,14 +459,19 @@ def main():
         run_id = int(v["run_id"])
         print(f"\n=== PaCMAP Run {run_id} ===")
         print(v)
-        coords, layout_s = run_pacmap_variant(
-            X=X_svd,
-            n_neighbors=v["n_neighbors"],
-            mn_ratio=v["mn_ratio"],
-            fp_ratio=v["fp_ratio"],
-            n_iters=v["n_iters"],
-            random_state=random_state,
-        )
+        if all_isolated:
+            coords = _get_layout_coords(None)
+            layout_s = 0.0
+        else:
+            coords, layout_s = run_pacmap_variant(
+                X=X_svd,
+                n_neighbors=v["n_neighbors"],
+                mn_ratio=v["mn_ratio"],
+                fp_ratio=v["fp_ratio"],
+                n_iters=v["n_iters"],
+                random_state=random_state,
+            )
+            coords = _get_layout_coords(coords)
         nodes_df[f"x_adjp{run_id}"] = coords[:, 0]
         nodes_df[f"y_adjp{run_id}"] = coords[:, 1]
         nodes_df[f"z_adjp{run_id}"] = coords[:, 2]
@@ -367,71 +490,86 @@ def main():
             }
         )
 
-    for v in trimap_variants:
-        run_id = int(v["run_id"])
-        print(f"\n=== TriMAP Run {run_id} ===")
-        print(v)
-        coords, layout_s = run_trimap_variant(
-            X=X_svd,
-            n_inliers=v["n_inliers"],
-            n_outliers=v["n_outliers"],
-            n_random=v["n_random"],
-            n_iters=v["n_iters"],
-            random_state=random_state,
-        )
-        nodes_df[f"x_adjt{run_id}"] = coords[:, 0]
-        nodes_df[f"y_adjt{run_id}"] = coords[:, 1]
-        nodes_df[f"z_adjt{run_id}"] = coords[:, 2]
-        run_rows.append(
-            {
-                "algo": "trimap",
-                "run_id": run_id,
-                "svd_dim": d,
-                "n_inliers": int(v["n_inliers"]),
-                "n_outliers": int(v["n_outliers"]),
-                "n_random": int(v["n_random"]),
-                "n_iters": int(v["n_iters"]),
-                "random_state": "" if random_state is None else int(random_state),
-                "svd_seconds": round(float(svd_seconds_shared), 3),
-                "layout_seconds": round(float(layout_s), 3),
-            }
-        )
+    if not args.no_trimap:
+        for v in trimap_variants:
+            run_id = int(v["run_id"])
+            print(f"\n=== TriMAP Run {run_id} ===")
+            print(v)
+            if all_isolated:
+                coords = _get_layout_coords(None)
+                layout_s = 0.0
+            else:
+                coords, layout_s = run_trimap_variant(
+                    X=X_svd,
+                    n_inliers=v["n_inliers"],
+                    n_outliers=v["n_outliers"],
+                    n_random=v["n_random"],
+                    n_iters=v["n_iters"],
+                    random_state=random_state,
+                )
+                coords = _get_layout_coords(coords)
+            nodes_df[f"x_adjt{run_id}"] = coords[:, 0]
+            nodes_df[f"y_adjt{run_id}"] = coords[:, 1]
+            nodes_df[f"z_adjt{run_id}"] = coords[:, 2]
+            run_rows.append(
+                {
+                    "algo": "trimap",
+                    "run_id": run_id,
+                    "svd_dim": d,
+                    "n_inliers": int(v["n_inliers"]),
+                    "n_outliers": int(v["n_outliers"]),
+                    "n_random": int(v["n_random"]),
+                    "n_iters": int(v["n_iters"]),
+                    "random_state": "" if random_state is None else int(random_state),
+                    "svd_seconds": round(float(svd_seconds_shared), 3),
+                    "layout_seconds": round(float(layout_s), 3),
+                }
+            )
 
-    for v in phate_variants:
-        run_id = int(v["run_id"])
-        print(f"\n=== PHATE Run {run_id} ===")
-        print(v)
-        coords, layout_s, best_seed, best_tw, unique_n = run_phate_variant(
-            X=X_svd,
-            knn=v["knn"],
-            t=v["t"],
-            decay=v["decay"],
-            gamma=v["gamma"],
-            random_state=random_state,
-            seed_candidates=[42, 52, 62],
-            jitter=1e-6,
-        )
-        nodes_df[f"x_adjh{run_id}"] = coords[:, 0]
-        nodes_df[f"y_adjh{run_id}"] = coords[:, 1]
-        nodes_df[f"z_adjh{run_id}"] = coords[:, 2]
-        run_rows.append(
-            {
-                "algo": "phate",
-                "run_id": run_id,
-                "svd_dim": d,
-                "knn": int(v["knn"]),
-                "t": str(v["t"]),
-                "decay": int(v["decay"]),
-                "gamma": float(v["gamma"]),
-                "random_state": "" if random_state is None else int(random_state),
-                "seed_candidates": "42,52,62",
-                "best_seed": int(best_seed),
-                "best_trustworthiness": float(best_tw),
-                "n_unique_input": int(unique_n),
-                "svd_seconds": round(float(svd_seconds_shared), 3),
-                "layout_seconds": round(float(layout_s), 3),
-            }
-        )
+    if not args.no_phate:
+        for v in phate_variants:
+            run_id = int(v["run_id"])
+            print(f"\n=== PHATE Run {run_id} ===")
+            print(v)
+            if all_isolated:
+                coords = _get_layout_coords(None)
+                layout_s = 0.0
+                best_seed = 42
+                best_tw = 0.0
+                unique_n = 0
+            else:
+                coords, layout_s, best_seed, best_tw, unique_n = run_phate_variant(
+                    X=X_svd,
+                    knn=v["knn"],
+                    t=v["t"],
+                    decay=v["decay"],
+                    gamma=v["gamma"],
+                    random_state=random_state,
+                    seed_candidates=[42, 52, 62, 72, 82],
+                    jitter=1e-6,
+                )
+                coords = _get_layout_coords(coords)
+            nodes_df[f"x_adjh{run_id}"] = coords[:, 0]
+            nodes_df[f"y_adjh{run_id}"] = coords[:, 1]
+            nodes_df[f"z_adjh{run_id}"] = coords[:, 2]
+            run_rows.append(
+                {
+                    "algo": "phate",
+                    "run_id": run_id,
+                    "svd_dim": d,
+                    "knn": int(v["knn"]),
+                    "t": str(v["t"]),
+                    "decay": int(v["decay"]),
+                    "gamma": float(v["gamma"]),
+                    "random_state": "" if random_state is None else int(random_state),
+                    "seed_candidates": "42,52,62,72,82",
+                    "best_seed": int(best_seed),
+                    "best_trustworthiness": float(best_tw),
+                    "n_unique_input": int(unique_n),
+                    "svd_seconds": round(float(svd_seconds_shared), 3),
+                    "layout_seconds": round(float(layout_s), 3),
+                }
+            )
 
     nodes_df.to_csv(nodes_out, sep="\t", index=False)
     pd.DataFrame(run_rows).sort_values("run_id").to_csv(runs_out, sep="\t", index=False)

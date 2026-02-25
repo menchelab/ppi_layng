@@ -39,13 +39,19 @@ def parse_args():
         "--sample-n",
         type=int,
         default=2400,
-        help="Sample size per layout for parameter sweep (default: 1200).",
+        help="Sample size per layout for parameter sweep (default: 2400).",
     )
     p.add_argument(
         "--seed",
         type=int,
         default=42,
         help="Random seed (default: 42).",
+    )
+    p.add_argument(
+        "--seed-list",
+        type=str,
+        default="42,52,62",
+        help="Comma-separated seeds for robust candidate evaluation (default: 42,52,62).",
     )
     return p.parse_args()
 
@@ -103,7 +109,12 @@ def _center_fraction(X: np.ndarray, radius: float):
     return float(np.mean(r <= radius))
 
 
-def _pair_distance_rank_corr(X0: np.ndarray, X1: np.ndarray, rng: np.random.Generator, pair_n: int = 20000):
+def _pair_distance_rank_corr(
+    X0: np.ndarray,
+    X1: np.ndarray,
+    rng: np.random.Generator,
+    pair_n: int = 12000,
+):
     n = len(X0)
     if n < 3:
         return 1.0
@@ -122,7 +133,7 @@ def _pair_distance_rank_corr(X0: np.ndarray, X1: np.ndarray, rng: np.random.Gene
     return float(corr)
 
 
-def _evaluate_forceatlas_candidate(X: np.ndarray, cfg: dict, seed: int, rng: np.random.Generator):
+def _evaluate_forceatlas_once(X: np.ndarray, cfg: dict, seed: int, rng: np.random.Generator):
     nn0 = _sample_nn(X)
     nn0_med = float(np.median(nn0)) if len(nn0) else np.nan
     c0 = _center_fraction(X, radius=1.0)
@@ -131,9 +142,19 @@ def _evaluate_forceatlas_candidate(X: np.ndarray, cfg: dict, seed: int, rng: np.
         X,
         iterations=int(cfg["iterations"]),
         repulsion_strength=float(cfg["repulsion_strength"]),
+        step_size=float(cfg.get("step_size", 0.1)),
         min_dist=1e-3,  # safer for stability
         use_knn=True,
         k_repel=int(cfg["k_repel"]),
+        anchor_strength=float(cfg.get("anchor_strength", 0.0)),
+        max_step_factor=float(cfg.get("max_step_factor", 0.0)),
+        dense_only_quantile=cfg.get("dense_only_quantile", None),
+        two_phase=bool(cfg.get("two_phase", False)),
+        phase_split=float(cfg.get("phase_split", 0.35)),
+        phase1_strength_mult=float(cfg.get("phase1_strength_mult", 1.5)),
+        phase2_strength_mult=float(cfg.get("phase2_strength_mult", 0.6)),
+        early_stop_patience=int(cfg.get("early_stop_patience", 0)),
+        early_stop_min_improve=float(cfg.get("early_stop_min_improve", 1e-4)),
         random_state=seed,
     )
 
@@ -171,13 +192,13 @@ def _evaluate_forceatlas_candidate(X: np.ndarray, cfg: dict, seed: int, rng: np.
     # - preserve pairwise rank structure
     # - penalize large global scale distortions
     score = (
-        0.40 * center_relief
-        + 0.25 * spread_improve
-        + 0.35 * rank_corr
-        - 0.30 * log_scale_shift
+        0.10 * center_relief
+        + 0.40 * spread_improve
+        + 0.40 * rank_corr
+        - 0.15 * log_scale_shift
     )
     return {
-        "score": float(score),
+        "score_single": float(score),
         "nn_med_before": float(nn0_med) if np.isfinite(nn0_med) else np.nan,
         "nn_med_after": float(nn1_med) if np.isfinite(nn1_med) else np.nan,
         "center_before_r1.0": float(c0),
@@ -188,6 +209,116 @@ def _evaluate_forceatlas_candidate(X: np.ndarray, cfg: dict, seed: int, rng: np.
         "log_scale_shift": float(log_scale_shift),
         "rank_corr": float(rank_corr),
     }
+
+
+def _evaluate_forceatlas_candidate_multi(
+    X: np.ndarray,
+    cfg: dict,
+    seeds: list[int],
+    base_seed: int,
+):
+    runs = []
+    for s in seeds:
+        rng = np.random.default_rng(base_seed + int(s))
+        res = _evaluate_forceatlas_once(X, cfg, seed=int(s), rng=rng)
+        if res is not None:
+            runs.append(res)
+    if not runs:
+        return None
+
+    score_vals = np.array([r["score_single"] for r in runs], dtype=np.float64)
+    score_mean = float(np.mean(score_vals))
+    score_std = float(np.std(score_vals))
+    # Stability-aware objective: prioritize robust candidates over brittle lucky ones.
+    score_stable = score_mean - 0.5 * score_std
+
+    def _mean_key(k: str) -> float:
+        vals = np.array([r[k] for r in runs], dtype=np.float64)
+        return float(np.nanmean(vals))
+
+    out = {
+        "score": score_stable,
+        "score_mean": score_mean,
+        "score_std": score_std,
+        "n_seed_runs": int(len(runs)),
+        "nn_med_before": _mean_key("nn_med_before"),
+        "nn_med_after": _mean_key("nn_med_after"),
+        "center_before_r1.0": _mean_key("center_before_r1.0"),
+        "center_after_r1.0": _mean_key("center_after_r1.0"),
+        "center_relief": _mean_key("center_relief"),
+        "spread_improve_log": _mean_key("spread_improve_log"),
+        "scale_ratio_median_radius": _mean_key("scale_ratio_median_radius"),
+        "log_scale_shift": _mean_key("log_scale_shift"),
+        "rank_corr": _mean_key("rank_corr"),
+    }
+    return out
+
+
+def _build_fine_grid(top_cfgs: list[dict]):
+    fine = []
+    for cfg in top_cfgs:
+        it = int(cfg["iterations"])
+        rs = float(cfg["repulsion_strength"])
+        kk = int(cfg["k_repel"])
+        anchor = float(cfg.get("anchor_strength", 0.0))
+        msf = float(cfg.get("max_step_factor", 0.0))
+        dense_q = cfg.get("dense_only_quantile", None)
+        step_size = float(cfg.get("step_size", 0.1))
+        two_phase = bool(cfg.get("two_phase", False))
+        phase_split = float(cfg.get("phase_split", 0.35))
+        p1 = float(cfg.get("phase1_strength_mult", 1.5))
+        p2 = float(cfg.get("phase2_strength_mult", 0.6))
+        esp = int(cfg.get("early_stop_patience", 0))
+        esi = float(cfg.get("early_stop_min_improve", 1e-4))
+        for it2 in [max(20, int(it * 0.8)), it, int(it * 1.25)]:
+            for rs2 in [max(0.03, rs * 0.8), rs, rs * 1.2]:
+                for k2 in [max(10, int(kk * 0.8)), kk, int(kk * 1.2)]:
+                    fine.append(
+                        {
+                            "profile": f"fine_{cfg['profile']}",
+                            "iterations": int(it2),
+                            "repulsion_strength": float(rs2),
+                            "k_repel": int(k2),
+                            "step_size": step_size,
+                            "anchor_strength": anchor,
+                            "max_step_factor": msf,
+                            "dense_only_quantile": dense_q,
+                            "two_phase": two_phase,
+                            "phase_split": phase_split,
+                            "phase1_strength_mult": p1,
+                            "phase2_strength_mult": p2,
+                            "early_stop_patience": esp,
+                            "early_stop_min_improve": esi,
+                        }
+                    )
+    # Deduplicate configs
+    seen = set()
+    out = []
+    for c in fine:
+        key = (
+            c["iterations"],
+            round(c["repulsion_strength"], 6),
+            c["k_repel"],
+            round(float(c.get("anchor_strength", 0.0)), 6),
+            round(float(c.get("max_step_factor", 0.0)), 6),
+            c.get("dense_only_quantile", None),
+            bool(c.get("two_phase", False)),
+        )
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
+def _global_drift_risk(row: pd.Series) -> str:
+    """Simple traffic-light risk based on scale shift + rank-structure preservation."""
+    ls = float(row.get("log_scale_shift", 0.0))
+    rc = float(row.get("rank_corr", 1.0))
+    if ls >= 0.55 or rc < 0.90:
+        return "high"
+    if ls >= 0.35 or rc < 0.95:
+        return "med"
+    return "low"
 
 
 def main():
@@ -203,13 +334,9 @@ def main():
         raise ValueError("No layout columns found. Expected x_*/y_*/z_* or x/y/z.")
 
     rng = np.random.default_rng(args.seed)
-    grid = [
-        {"profile": "mild", "iterations": 40, "repulsion_strength": 0.12, "k_repel": 25},
-        {"profile": "balanced", "iterations": 60, "repulsion_strength": 0.20, "k_repel": 40},
-        {"profile": "spread", "iterations": 90, "repulsion_strength": 0.30, "k_repel": 60},
-        {"profile": "strong", "iterations": 120, "repulsion_strength": 0.40, "k_repel": 80},
-        {"profile": "aggressive", "iterations": 160, "repulsion_strength": 0.55, "k_repel": 110},
-    ]
+    seeds = [int(x) for x in str(args.seed_list).split(",") if str(x).strip()]
+    if not seeds:
+        seeds = [42, 52, 62]
 
     rows = []
     layout_pbar = tqdm(layouts, desc="Layouts", unit=" layout")
@@ -220,7 +347,28 @@ def main():
         baseline_nn = _sample_nn(X)
         baseline_nn_med = float(np.median(baseline_nn)) if len(baseline_nn) else np.nan
 
-        best = None
+        # Adaptive coarse grid by baseline density.
+        if np.isfinite(baseline_nn_med) and baseline_nn_med < 0.05:
+            coarse_grid = [
+                {"profile": "mild", "iterations": 45, "repulsion_strength": 0.08, "k_repel": 18, "step_size": 0.08, "anchor_strength": 0.18, "max_step_factor": 0.015, "dense_only_quantile": 0.20, "two_phase": True, "phase_split": 0.35, "phase1_strength_mult": 1.4, "phase2_strength_mult": 0.7, "early_stop_patience": 8, "early_stop_min_improve": 2e-4},
+                {"profile": "balanced", "iterations": 70, "repulsion_strength": 0.12, "k_repel": 28, "step_size": 0.08, "anchor_strength": 0.22, "max_step_factor": 0.018, "dense_only_quantile": 0.25, "two_phase": True, "phase_split": 0.35, "phase1_strength_mult": 1.5, "phase2_strength_mult": 0.65, "early_stop_patience": 10, "early_stop_min_improve": 2e-4},
+                {"profile": "spread", "iterations": 90, "repulsion_strength": 0.16, "k_repel": 40, "step_size": 0.09, "anchor_strength": 0.20, "max_step_factor": 0.020, "dense_only_quantile": 0.30, "two_phase": True, "phase_split": 0.4, "phase1_strength_mult": 1.6, "phase2_strength_mult": 0.6, "early_stop_patience": 10, "early_stop_min_improve": 2e-4},
+                {"profile": "strong", "iterations": 120, "repulsion_strength": 0.22, "k_repel": 55, "step_size": 0.10, "anchor_strength": 0.16, "max_step_factor": 0.025, "dense_only_quantile": 0.35, "two_phase": True, "phase_split": 0.45, "phase1_strength_mult": 1.7, "phase2_strength_mult": 0.55, "early_stop_patience": 12, "early_stop_min_improve": 2e-4},
+            ]
+        elif np.isfinite(baseline_nn_med) and baseline_nn_med < 0.20:
+            coarse_grid = [
+                {"profile": "mild", "iterations": 35, "repulsion_strength": 0.06, "k_repel": 16, "step_size": 0.07, "anchor_strength": 0.25, "max_step_factor": 0.012, "dense_only_quantile": 0.18, "two_phase": True, "phase_split": 0.35, "phase1_strength_mult": 1.35, "phase2_strength_mult": 0.75, "early_stop_patience": 8, "early_stop_min_improve": 2e-4},
+                {"profile": "balanced", "iterations": 50, "repulsion_strength": 0.10, "k_repel": 24, "step_size": 0.08, "anchor_strength": 0.24, "max_step_factor": 0.015, "dense_only_quantile": 0.22, "two_phase": True, "phase_split": 0.35, "phase1_strength_mult": 1.45, "phase2_strength_mult": 0.7, "early_stop_patience": 10, "early_stop_min_improve": 2e-4},
+                {"profile": "spread", "iterations": 70, "repulsion_strength": 0.14, "k_repel": 34, "step_size": 0.08, "anchor_strength": 0.20, "max_step_factor": 0.018, "dense_only_quantile": 0.28, "two_phase": True, "phase_split": 0.4, "phase1_strength_mult": 1.55, "phase2_strength_mult": 0.65, "early_stop_patience": 10, "early_stop_min_improve": 2e-4},
+                {"profile": "strong", "iterations": 95, "repulsion_strength": 0.18, "k_repel": 44, "step_size": 0.09, "anchor_strength": 0.18, "max_step_factor": 0.020, "dense_only_quantile": 0.32, "two_phase": True, "phase_split": 0.4, "phase1_strength_mult": 1.65, "phase2_strength_mult": 0.6, "early_stop_patience": 12, "early_stop_min_improve": 2e-4},
+            ]
+        else:
+            coarse_grid = [
+                {"profile": "mild", "iterations": 20, "repulsion_strength": 0.04, "k_repel": 12, "step_size": 0.06, "anchor_strength": 0.30, "max_step_factor": 0.010, "dense_only_quantile": 0.15, "two_phase": False, "early_stop_patience": 6, "early_stop_min_improve": 2e-4},
+                {"profile": "balanced", "iterations": 30, "repulsion_strength": 0.07, "k_repel": 18, "step_size": 0.07, "anchor_strength": 0.28, "max_step_factor": 0.012, "dense_only_quantile": 0.20, "two_phase": True, "phase_split": 0.35, "phase1_strength_mult": 1.35, "phase2_strength_mult": 0.75, "early_stop_patience": 8, "early_stop_min_improve": 2e-4},
+                {"profile": "spread", "iterations": 45, "repulsion_strength": 0.10, "k_repel": 26, "step_size": 0.08, "anchor_strength": 0.24, "max_step_factor": 0.015, "dense_only_quantile": 0.25, "two_phase": True, "phase_split": 0.4, "phase1_strength_mult": 1.45, "phase2_strength_mult": 0.7, "early_stop_patience": 10, "early_stop_min_improve": 2e-4},
+            ]
+
         # No-op baseline: explicit option to keep original layout
         best = {
             "layout": name,
@@ -241,13 +389,29 @@ def main():
             "scale_ratio_median_radius": 1.0,
             "log_scale_shift": 0.0,
             "rank_corr": 1.0,
+            "score_mean": 0.0,
+            "score_std": 0.0,
+            "n_seed_runs": len(seeds),
+            "step_size": 0.0,
+            "anchor_strength": 0.0,
+            "max_step_factor": 0.0,
+            "dense_only_quantile": "",
+            "two_phase": False,
+            "phase_split": 0.35,
+            "phase1_strength_mult": 1.5,
+            "phase2_strength_mult": 0.6,
+            "early_stop_patience": 0,
+            "early_stop_min_improve": 0.0,
         }
-        cfg_pbar = tqdm(grid, desc=f"{name}: sweep", unit=" cfg", leave=False)
+        all_candidates = []
+        cfg_pbar = tqdm(coarse_grid, desc=f"{name}: coarse", unit=" cfg", leave=False)
         for cfg in cfg_pbar:
             cfg_pbar.set_postfix_str(
                 f"{cfg['profile']} it={cfg['iterations']} r={cfg['repulsion_strength']} k={cfg['k_repel']}"
             )
-            res = _evaluate_forceatlas_candidate(X, cfg, seed=args.seed, rng=rng)
+            res = _evaluate_forceatlas_candidate_multi(
+                X, cfg, seeds=seeds, base_seed=args.seed
+            )
             if res is None:
                 continue
             cand = {
@@ -259,40 +423,98 @@ def main():
                 "iterations": cfg["iterations"],
                 "repulsion_strength": cfg["repulsion_strength"],
                 "k_repel": cfg["k_repel"],
+                "step_size": cfg.get("step_size", 0.1),
+                "anchor_strength": cfg.get("anchor_strength", 0.0),
+                "max_step_factor": cfg.get("max_step_factor", 0.0),
+                "dense_only_quantile": cfg.get("dense_only_quantile", ""),
+                "two_phase": cfg.get("two_phase", False),
+                "phase_split": cfg.get("phase_split", 0.35),
+                "phase1_strength_mult": cfg.get("phase1_strength_mult", 1.5),
+                "phase2_strength_mult": cfg.get("phase2_strength_mult", 0.6),
+                "early_stop_patience": cfg.get("early_stop_patience", 0),
+                "early_stop_min_improve": cfg.get("early_stop_min_improve", 1e-4),
                 **res,
             }
+            all_candidates.append(cand)
             if best is None or cand["score"] > best["score"]:
                 best = cand
                 cfg_pbar.set_postfix_str(
-                    f"best={cfg['profile']} score={best['score']:.4f}"
+                    f"best={cfg['profile']} score={best['score']:.4f}±{best['score_std']:.4f}"
                 )
+
+        # Fine search around top 2 coarse candidates.
+        top_coarse = sorted(all_candidates, key=lambda x: x["score"], reverse=True)[:2]
+        fine_grid = _build_fine_grid(top_coarse)
+        if fine_grid:
+            fine_pbar = tqdm(fine_grid, desc=f"{name}: fine", unit=" cfg", leave=False)
+            for cfg in fine_pbar:
+                fine_pbar.set_postfix_str(
+                    f"{cfg['profile']} it={cfg['iterations']} r={cfg['repulsion_strength']:.3f} k={cfg['k_repel']}"
+                )
+                res = _evaluate_forceatlas_candidate_multi(
+                    X, cfg, seeds=seeds, base_seed=args.seed
+                )
+                if res is None:
+                    continue
+                cand = {
+                    "layout": name,
+                    "sample_n": len(X),
+                    "baseline_center_r1.0": baseline_center,
+                    "baseline_nn_med": baseline_nn_med,
+                    "profile": cfg["profile"],
+                    "iterations": cfg["iterations"],
+                    "repulsion_strength": cfg["repulsion_strength"],
+                    "k_repel": cfg["k_repel"],
+                    "step_size": cfg.get("step_size", 0.1),
+                    "anchor_strength": cfg.get("anchor_strength", 0.0),
+                    "max_step_factor": cfg.get("max_step_factor", 0.0),
+                    "dense_only_quantile": cfg.get("dense_only_quantile", ""),
+                    "two_phase": cfg.get("two_phase", False),
+                    "phase_split": cfg.get("phase_split", 0.35),
+                    "phase1_strength_mult": cfg.get("phase1_strength_mult", 1.5),
+                    "phase2_strength_mult": cfg.get("phase2_strength_mult", 0.6),
+                    "early_stop_patience": cfg.get("early_stop_patience", 0),
+                    "early_stop_min_improve": cfg.get("early_stop_min_improve", 1e-4),
+                    **res,
+                }
+                if best is None or cand["score"] > best["score"]:
+                    best = cand
+                    fine_pbar.set_postfix_str(
+                        f"best={cfg['profile']} score={best['score']:.4f}±{best['score_std']:.4f}"
+                    )
 
         if best is not None:
             # Only recommend when improvement is meaningful and not just rescaling.
             best["recommend_postprocess"] = bool(
                 (best["profile"] != "none")
-                and (best["score"] > 0.08)
+                and (best["score"] > 0.10)
                 and (best["center_relief"] > 0.01)
-                and (best["log_scale_shift"] < 0.8)
+                and (best["log_scale_shift"] < 0.55)
+                and (best["rank_corr"] > 0.90)
+                and (best["score_std"] < 0.08)
             )
+            best["seed_list"] = ",".join(str(s) for s in seeds)
             rows.append(best)
 
     if not rows:
         raise RuntimeError("No valid recommendations generated.")
 
     out_df = pd.DataFrame(rows).sort_values(["recommend_postprocess", "score"], ascending=[False, False])
+    out_df["global_drift_risk"] = out_df.apply(_global_drift_risk, axis=1)
     out_df.to_csv(out_path, sep="\t", index=False)
 
     print("ForceAtlas postprocess recommendation report")
     print("=" * 90)
     print(f"Input: {path}")
     print(f"Output: {out_path}")
-    print(f"{'layout':<30} {'rec?':<6} {'score':>8} {'profile':<10} {'iters':>6} {'repel':>8} {'k':>5}")
+    print(
+        f"{'layout':<30} {'rec?':<6} {'risk':<5} {'score':>8} {'profile':<10} {'iters':>6} {'repel':>8} {'k':>5}"
+    )
     print("-" * 90)
     for _, r in out_df.iterrows():
         rec = "yes" if bool(r["recommend_postprocess"]) else "no"
         print(
-            f"{str(r['layout']):<30} {rec:<6} {float(r['score']):>8.4f} "
+            f"{str(r['layout']):<30} {rec:<6} {str(r['global_drift_risk']):<5} {float(r['score']):>8.4f} "
             f"{str(r['profile']):<10} {int(r['iterations']):>6} "
             f"{float(r['repulsion_strength']):>8.3f} {int(r['k_repel']):>5}"
         )
