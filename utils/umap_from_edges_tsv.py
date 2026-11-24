@@ -20,6 +20,12 @@ Usage:
 """
 from __future__ import annotations
 
+# PaCMAP must load before numpy/scipy/sklearn on Windows (native DLL init order).
+try:
+    import pacmap  # noqa: F401
+except ImportError:
+    pacmap = None  # type: ignore[assignment,misc]
+
 import argparse
 import time
 from datetime import datetime
@@ -279,10 +285,8 @@ def run_umap_variant(
 def run_pacmap_default(X: np.ndarray, random_state: int | None):
     """Run PaCMAP with library defaults (no parameters specified). Uses data-adaptive
     choices where needed (e.g. caps n_neighbors for tiny datasets)."""
-    try:
-        import pacmap
-    except ImportError as e:
-        raise RuntimeError("Please install pacmap: pip install pacmap") from e
+    if pacmap is None:
+        raise RuntimeError("Please install pacmap: pip install pacmap")
 
     X = np.asarray(X, dtype=np.float32)
     rs = 42 if random_state is None else int(random_state)
@@ -307,10 +311,8 @@ def run_pacmap_variant(
     n_iters: int,
     random_state: int | None,
 ):
-    try:
-        import pacmap
-    except ImportError as e:
-        raise RuntimeError("Please install pacmap: pip install pacmap") from e
+    if pacmap is None:
+        raise RuntimeError("Please install pacmap: pip install pacmap")
 
     rs = 42 if random_state is None else int(random_state)
     reducer = pacmap.PaCMAP(
@@ -538,13 +540,13 @@ def _load_runs_from_tsv(path: Path) -> list[dict]:
 
         if algo == "umap":
             spec.update(
-                n_neighbors=_int("n_neighbors", 20),
-                min_dist=float(_f("min_dist", 0.01)),
+                n_neighbors=_int("n_neighbors", 15),
+                min_dist=float(_f("min_dist", 0.1)),
                 spread=float(_f("spread", 1.0)),
                 metric=str(_f("metric", "cosine")),
-                n_epochs=_int("n_epochs", 1200),
-                repulsion_strength=float(_f("repulsion_strength", 1.5)),
-                negative_sample_rate=_int("negative_sample_rate", 12),
+                n_epochs=_int("n_epochs", 800),
+                repulsion_strength=float(_f("repulsion_strength", 1.0)),
+                negative_sample_rate=_int("negative_sample_rate", 7),
             )
         elif algo == "pacmap":
             use_def = row.get("use_defaults", "")
@@ -552,39 +554,39 @@ def _load_runs_from_tsv(path: Path) -> list[dict]:
                 spec["use_defaults"] = True
             else:
                 spec.update(
-                    n_neighbors=_int("n_neighbors", 20),
+                    n_neighbors=_int("n_neighbors", 12),
                     mn_ratio=float(_f("mn_ratio", 0.5)),
-                    fp_ratio=float(_f("fp_ratio", 1.5)),
-                    n_iters=_int("n_iters", 800),
+                    fp_ratio=float(_f("fp_ratio", 2.0)),
+                    n_iters=_int("n_iters", 400),
                 )
         elif algo == "trimap":
             spec.update(
-                n_inliers=_int("n_inliers", 10),
-                n_outliers=_int("n_outliers", 5),
-                n_random=_int("n_random", 5),
-                n_iters=_int("n_iters", 800),
+                n_inliers=_int("n_inliers", 8),
+                n_outliers=_int("n_outliers", 4),
+                n_random=_int("n_random", 4),
+                n_iters=_int("n_iters", 500),
             )
         elif algo == "phate":
-            tv = row.get("t", 50)
+            tv = row.get("t", 20)
             try:
-                t_val = int(float(tv)) if pd.notna(tv) and str(tv).strip() != "" else 50
+                t_val = int(float(tv)) if pd.notna(tv) and str(tv).strip() != "" else 20
             except (ValueError, TypeError):
-                t_val = 50
+                t_val = 20
             spec.update(
-                knn=_int("knn", 30),
+                knn=_int("knn", 15),
                 t=t_val,
-                decay=_int("decay", 60),
+                decay=_int("decay", 45),
                 gamma=float(_f("gamma", 0.5)),
             )
         elif algo == "forceatlas2":
             spec.update(
-                max_iter=_int("max_iter", 200),
-                gravity=float(_f("gravity", 0.5)),
-                scaling_ratio=float(_f("scaling_ratio", 2.0)),
+                max_iter=_int("max_iter", 400),
+                gravity=float(_f("gravity", 0.75)),
+                scaling_ratio=float(_f("scaling_ratio", 1.5)),
             )
         elif algo == "spring":
             k_val = row.get("k")
-            spec["iterations"] = _int("iterations", 200)
+            spec["iterations"] = _int("iterations", 300)
             spec["k"] = None if pd.isna(k_val) or k_val == "" else float(k_val)
         runs.append(spec)
     return runs
@@ -622,6 +624,17 @@ def _procrustes_align(X: np.ndarray, X_ref: np.ndarray) -> np.ndarray:
         return (X_c @ R) + cen_ref
     except Exception:
         return X_c + cen_ref
+
+
+def _flush_outputs(
+    nodes_df: pd.DataFrame,
+    run_rows: list[dict],
+    nodes_out: Path,
+    runs_out: Path,
+) -> None:
+    """Write current progress so a later crash does not leave an empty folder."""
+    nodes_df.to_csv(nodes_out, sep="\t", index=False)
+    pd.DataFrame(run_rows).sort_values(["algo", "run_id"]).to_csv(runs_out, sep="\t", index=False)
 
 
 def _apply_procrustes_to_layouts(nodes_df: pd.DataFrame) -> None:
@@ -698,7 +711,8 @@ def main():
     else:
         A_layout = A
 
-    fixed_svd_dim = 384
+    # ~1k nodes / ~2k edges (sparse PPI-scale): 32 SVD dims; UMAP 500–1200 epochs is enough.
+    fixed_svd_dim = 32
     all_isolated = n_connected == 0
     if all_isolated:
         X_svd = np.zeros((0, 8), dtype=np.float32)
@@ -716,91 +730,74 @@ def main():
         svd_seconds_shared = time.time() - t_svd0
         print(f"Shared SVD done: dim={d}, seconds={svd_seconds_shared:.3f}")
 
-    # 40 diverse UMAP variants tuned for ~20k nodes, 350k edges, high-degree hubs.
-    # Varies: n_neighbors, min_dist, spread, repulsion_strength, negative_sample_rate, n_epochs.
+    # 20 UMAP variants for ~900 nodes / ~1.7k edges (avg degree ~4), 3D.
+    # vs 40k-scale: lower SVD dim, n_neighbors 6–22, min_dist >= 0.05, n_epochs 600–1200.
     variants = [
-        # Compact (low spread, low repulsion) – clusters closer to center
-        {"run_id": 1, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.01, "spread": 0.3, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.5, "negative_sample_rate": 5},
-        {"run_id": 2, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.005, "spread": 0.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.5, "negative_sample_rate": 5},
-        {"run_id": 3, "svd_dim": fixed_svd_dim, "n_neighbors": 25, "min_dist": 0.01, "spread": 0.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.25, "negative_sample_rate": 5},
-        {"run_id": 4, "svd_dim": fixed_svd_dim, "n_neighbors": 30, "min_dist": 0.01, "spread": 0.7, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.5, "negative_sample_rate": 3},
-        {"run_id": 5, "svd_dim": fixed_svd_dim, "n_neighbors": 10, "min_dist": 0.002, "spread": 0.3, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 0.5, "negative_sample_rate": 7},
-        # Local focus (low n_neighbors, tight min_dist)
-        {"run_id": 6, "svd_dim": fixed_svd_dim, "n_neighbors": 5, "min_dist": 0.0, "spread": 1.0, "metric": "cosine", "n_epochs": 6000, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 7, "svd_dim": fixed_svd_dim, "n_neighbors": 8, "min_dist": 0.001, "spread": 0.8, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 8, "svd_dim": fixed_svd_dim, "n_neighbors": 10, "min_dist": 0.001, "spread": 0.7, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        {"run_id": 9, "svd_dim": fixed_svd_dim, "n_neighbors": 12, "min_dist": 0.002, "spread": 0.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        {"run_id": 10, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.002, "spread": 0.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        # Global / hub-friendly (high n_neighbors)
-        {"run_id": 11, "svd_dim": fixed_svd_dim, "n_neighbors": 40, "min_dist": 0.01, "spread": 1.0, "metric": "cosine", "n_epochs": 4500, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 12, "svd_dim": fixed_svd_dim, "n_neighbors": 50, "min_dist": 0.02, "spread": 1.0, "metric": "cosine", "n_epochs": 4500, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 13, "svd_dim": fixed_svd_dim, "n_neighbors": 35, "min_dist": 0.02, "spread": 0.8, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        {"run_id": 14, "svd_dim": fixed_svd_dim, "n_neighbors": 45, "min_dist": 0.005, "spread": 0.7, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.5, "negative_sample_rate": 5},
-        {"run_id": 15, "svd_dim": fixed_svd_dim, "n_neighbors": 30, "min_dist": 0.05, "spread": 1.0, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.25, "negative_sample_rate": 10},
-        # Spread out (higher spread, stronger repulsion)
-        {"run_id": 16, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 1.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.5, "negative_sample_rate": 15},
-        {"run_id": 17, "svd_dim": fixed_svd_dim, "n_neighbors": 25, "min_dist": 0.02, "spread": 1.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.5, "negative_sample_rate": 15},
-        {"run_id": 18, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.005, "spread": 2.0, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.25, "negative_sample_rate": 15},
-        {"run_id": 19, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 1.0, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.5, "negative_sample_rate": 20},
-        {"run_id": 20, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.005, "spread": 1.2, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 1.5, "negative_sample_rate": 12},
-        # Softer packing (higher min_dist)
-        {"run_id": 21, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.1, "spread": 1.0, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 22, "svd_dim": fixed_svd_dim, "n_neighbors": 25, "min_dist": 0.05, "spread": 0.8, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        {"run_id": 23, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.05, "spread": 0.5, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.5, "negative_sample_rate": 5},
-        {"run_id": 24, "svd_dim": fixed_svd_dim, "n_neighbors": 30, "min_dist": 0.1, "spread": 0.7, "metric": "cosine", "n_epochs": 4500, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        {"run_id": 25, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.02, "spread": 0.6, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.75, "negative_sample_rate": 10},
-        # Light repulsion (low negative_sample_rate)
-        {"run_id": 26, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 0.5, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 0.75, "negative_sample_rate": 3},
-        {"run_id": 27, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.005, "spread": 0.4, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 0.5, "negative_sample_rate": 3},
-        {"run_id": 28, "svd_dim": fixed_svd_dim, "n_neighbors": 25, "min_dist": 0.01, "spread": 0.6, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.5, "negative_sample_rate": 5},
-        {"run_id": 29, "svd_dim": fixed_svd_dim, "n_neighbors": 18, "min_dist": 0.002, "spread": 0.4, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 0.25, "negative_sample_rate": 5},
-        {"run_id": 30, "svd_dim": fixed_svd_dim, "n_neighbors": 22, "min_dist": 0.01, "spread": 0.7, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        # Strong repulsion (high negative_sample_rate)
-        {"run_id": 31, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 1.0, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 1.25, "negative_sample_rate": 15},
-        {"run_id": 32, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.005, "spread": 1.2, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 1.5, "negative_sample_rate": 20},
-        {"run_id": 33, "svd_dim": fixed_svd_dim, "n_neighbors": 25, "min_dist": 0.01, "spread": 1.2, "metric": "cosine", "n_epochs": 5000, "repulsion_strength": 1.25, "negative_sample_rate": 15},
-        {"run_id": 34, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.002, "spread": 0.9, "metric": "cosine", "n_epochs": 6000, "repulsion_strength": 1.5, "negative_sample_rate": 12},
-        {"run_id": 35, "svd_dim": fixed_svd_dim, "n_neighbors": 18, "min_dist": 0.005, "spread": 1.0, "metric": "cosine", "n_epochs": 5500, "repulsion_strength": 1.25, "negative_sample_rate": 15},
-        # Epochs / convergence variants
-        {"run_id": 36, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 0.8, "metric": "cosine", "n_epochs": 3000, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 37, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 0.8, "metric": "cosine", "n_epochs": 6000, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 38, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.005, "spread": 0.5, "metric": "cosine", "n_epochs": 6000, "repulsion_strength": 0.75, "negative_sample_rate": 7},
-        # Euclidean metric (different manifold assumption)
-        {"run_id": 39, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.01, "spread": 0.8, "metric": "euclidean", "n_epochs": 5000, "repulsion_strength": 1.0, "negative_sample_rate": 10},
-        {"run_id": 40, "svd_dim": fixed_svd_dim, "n_neighbors": 25, "min_dist": 0.02, "spread": 0.6, "metric": "euclidean", "n_epochs": 5000, "repulsion_strength": 0.75, "negative_sample_rate": 7},
+        # Baseline
+        {"run_id": 1, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.1, "spread": 1.0, "metric": "cosine", "n_epochs": 800, "repulsion_strength": 1.0, "negative_sample_rate": 5},
+        {"run_id": 2, "svd_dim": fixed_svd_dim, "n_neighbors": 12, "min_dist": 0.08, "spread": 0.9, "metric": "cosine", "n_epochs": 800, "repulsion_strength": 1.0, "negative_sample_rate": 5},
+        # Local / community structure
+        {"run_id": 3, "svd_dim": fixed_svd_dim, "n_neighbors": 8, "min_dist": 0.1, "spread": 0.7, "metric": "cosine", "n_epochs": 1000, "repulsion_strength": 1.05, "negative_sample_rate": 5},
+        {"run_id": 4, "svd_dim": fixed_svd_dim, "n_neighbors": 10, "min_dist": 0.12, "spread": 0.75, "metric": "cosine", "n_epochs": 900, "repulsion_strength": 1.0, "negative_sample_rate": 7},
+        # Balanced
+        {"run_id": 5, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.15, "spread": 1.0, "metric": "cosine", "n_epochs": 800, "repulsion_strength": 1.0, "negative_sample_rate": 7},
+        {"run_id": 6, "svd_dim": fixed_svd_dim, "n_neighbors": 18, "min_dist": 0.12, "spread": 1.0, "metric": "cosine", "n_epochs": 800, "repulsion_strength": 1.05, "negative_sample_rate": 8},
+        # More global (capped for sparse graphs)
+        {"run_id": 7, "svd_dim": fixed_svd_dim, "n_neighbors": 22, "min_dist": 0.18, "spread": 1.0, "metric": "cosine", "n_epochs": 700, "repulsion_strength": 1.0, "negative_sample_rate": 8},
+        {"run_id": 8, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.2, "spread": 1.05, "metric": "cosine", "n_epochs": 700, "repulsion_strength": 1.1, "negative_sample_rate": 8},
+        # Looser separation (readable 3D)
+        {"run_id": 9, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.25, "spread": 1.0, "metric": "cosine", "n_epochs": 600, "repulsion_strength": 1.1, "negative_sample_rate": 7},
+        {"run_id": 10, "svd_dim": fixed_svd_dim, "n_neighbors": 18, "min_dist": 0.22, "spread": 1.1, "metric": "cosine", "n_epochs": 700, "repulsion_strength": 1.15, "negative_sample_rate": 8},
+        # Euclidean on SVD features
+        {"run_id": 11, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.1, "spread": 1.0, "metric": "euclidean", "n_epochs": 800, "repulsion_strength": 1.0, "negative_sample_rate": 8},
+        {"run_id": 12, "svd_dim": fixed_svd_dim, "n_neighbors": 12, "min_dist": 0.15, "spread": 0.95, "metric": "euclidean", "n_epochs": 800, "repulsion_strength": 1.05, "negative_sample_rate": 7},
+        # Compact clusters
+        {"run_id": 13, "svd_dim": fixed_svd_dim, "n_neighbors": 10, "min_dist": 0.05, "spread": 0.6, "metric": "cosine", "n_epochs": 1000, "repulsion_strength": 1.1, "negative_sample_rate": 5},
+        {"run_id": 14, "svd_dim": fixed_svd_dim, "n_neighbors": 12, "min_dist": 0.06, "spread": 0.65, "metric": "cosine", "n_epochs": 1000, "repulsion_strength": 1.15, "negative_sample_rate": 6},
+        # Stronger repulsion (less overlap / Z blow-ups)
+        {"run_id": 15, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.1, "spread": 1.0, "metric": "cosine", "n_epochs": 900, "repulsion_strength": 1.25, "negative_sample_rate": 10},
+        {"run_id": 16, "svd_dim": fixed_svd_dim, "n_neighbors": 15, "min_dist": 0.12, "spread": 0.9, "metric": "cosine", "n_epochs": 900, "repulsion_strength": 1.35, "negative_sample_rate": 10},
+        # Very local (matches low average degree)
+        {"run_id": 17, "svd_dim": fixed_svd_dim, "n_neighbors": 6, "min_dist": 0.1, "spread": 0.65, "metric": "cosine", "n_epochs": 1100, "repulsion_strength": 1.1, "negative_sample_rate": 5},
+        {"run_id": 18, "svd_dim": fixed_svd_dim, "n_neighbors": 8, "min_dist": 0.14, "spread": 0.8, "metric": "cosine", "n_epochs": 1000, "repulsion_strength": 1.08, "negative_sample_rate": 6},
+        # Longer polish at stable settings
+        {"run_id": 19, "svd_dim": fixed_svd_dim, "n_neighbors": 16, "min_dist": 0.1, "spread": 0.95, "metric": "cosine", "n_epochs": 1200, "repulsion_strength": 1.0, "negative_sample_rate": 8},
+        {"run_id": 20, "svd_dim": fixed_svd_dim, "n_neighbors": 20, "min_dist": 0.15, "spread": 1.0, "metric": "euclidean", "n_epochs": 800, "repulsion_strength": 1.05, "negative_sample_rate": 8},
     ]
+    # PaCMAP / TriMAP / PHATE: SVD features; FA2 / spring: adjacency directly (~900 nodes).
     pacmap_variants = [
         {"run_id": 0, "use_defaults": True},
-
-
-
+        {"run_id": 1, "n_neighbors": 10, "mn_ratio": 0.5, "fp_ratio": 2.0, "n_iters": 450},
+        {"run_id": 2, "n_neighbors": 15, "mn_ratio": 0.5, "fp_ratio": 1.5, "n_iters": 350},
+        {"run_id": 3, "n_neighbors": 12, "mn_ratio": 0.75, "fp_ratio": 2.0, "n_iters": 400},
     ]
     trimap_variants = [
-        {"run_id": 1, "n_inliers": 10, "n_outliers": 5, "n_random": 5, "n_iters": 1600},
-        {"run_id": 2, "n_inliers": 20, "n_outliers": 10, "n_random": 10, "n_iters": 2400},
-        {"run_id": 3, "n_inliers": 30, "n_outliers": 15, "n_random": 10, "n_iters": 3200},
+        {"run_id": 1, "n_inliers": 6, "n_outliers": 3, "n_random": 3, "n_iters": 400},
+        {"run_id": 2, "n_inliers": 8, "n_outliers": 4, "n_random": 4, "n_iters": 500},
+        {"run_id": 3, "n_inliers": 10, "n_outliers": 5, "n_random": 5, "n_iters": 600},
+        {"run_id": 4, "n_inliers": 12, "n_outliers": 6, "n_random": 4, "n_iters": 700},
     ]
-    # Quality-focused PHATE sweep. Low t causes line collapse; higher t + gamma=0.5 gives 3D spread.
-    # adjh1/adjh2: raised t and gamma=0.5 to avoid "everything on one line".
-    # adjh3: raised t to spread hotspots; postprocess_apply_layouts can further refine.
     phate_variants = [
-        {"run_id": 1, "knn": 30, "t": 50, "decay": 60, "gamma": 0.5},
-        {"run_id": 2, "knn": 60, "t": 65, "decay": 80, "gamma": 0.5},
-        {"run_id": 3, "knn": 100, "t": 100, "decay": 100, "gamma": 0.5},
+        {"run_id": 1, "knn": 5, "t": 10, "decay": 40, "gamma": 0.5},
+        {"run_id": 2, "knn": 10, "t": 15, "decay": 40, "gamma": 0.5},
+        {"run_id": 3, "knn": 15, "t": 20, "decay": 45, "gamma": 0.5},
+        {"run_id": 4, "knn": 10, "t": 25, "decay": 50, "gamma": 0.5},
+        {"run_id": 5, "knn": 20, "t": 25, "decay": 50, "gamma": 0.5},
+        {"run_id": 6, "knn": 15, "t": 30, "decay": 55, "gamma": 0.5},
     ]
     forceatlas2_variants = [
-        {"run_id": 1, "max_iter": 2000, "gravity": 0.1, "scaling_ratio": 2.0},
-        {"run_id": 2, "max_iter": 2000, "gravity": 0.5, "scaling_ratio": 2.0},
-        {"run_id": 3, "max_iter": 2000, "gravity": 1, "scaling_ratio": 2.0},
-        {"run_id": 3, "max_iter": 2500, "gravity": 0.5, "scaling_ratio": 2.0},
-        {"run_id": 4, "max_iter": 2000, "gravity": 0.5, "scaling_ratio": 1.0},
-        {"run_id": 5, "max_iter": 2000, "gravity": 0.5, "scaling_ratio": 2.0},
-        {"run_id": 6, "max_iter": 2000, "gravity": 0.5, "scaling_ratio": 5},
-
+        {"run_id": 1, "max_iter": 300, "gravity": 0.5, "scaling_ratio": 2.0},
+        {"run_id": 2, "max_iter": 500, "gravity": 0.5, "scaling_ratio": 1.5},
+        {"run_id": 3, "max_iter": 400, "gravity": 1.0, "scaling_ratio": 1.0},
+        {"run_id": 4, "max_iter": 500, "gravity": 1.0, "scaling_ratio": 2.0},
+        {"run_id": 5, "max_iter": 600, "gravity": 0.75, "scaling_ratio": 1.5},
+        {"run_id": 6, "max_iter": 400, "gravity": 0.25, "scaling_ratio": 2.5},
     ]
     spring_variants = [
         {"run_id": 1, "iterations": 200, "k": None},
-        {"run_id": 2, "iterations": 500, "k": None},
+        {"run_id": 2, "iterations": 300, "k": None},
+        {"run_id": 3, "iterations": 400, "k": None},
+        {"run_id": 4, "iterations": 300, "k": 0.05},
     ]
 
     nodes_df = pd.DataFrame({"id": node_ids})
@@ -960,6 +957,7 @@ def main():
             nodes_df[f"y_{layout_base}"] = coords[:, 1]
             nodes_df[f"z_{layout_base}"] = coords[:, 2]
             run_rows.append(row)
+            _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
     else:
         for v in variants:
             run_id = int(v["run_id"])
@@ -1003,6 +1001,7 @@ def main():
                     "layout_seconds": round(float(layout_s), 3),
                 }
             )
+            _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
 
         for v in pacmap_variants:
             run_id = int(v["run_id"])
@@ -1045,6 +1044,7 @@ def main():
                     "layout_seconds": round(float(layout_s), 3),
                 }
             )
+            _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
 
         if not args.no_trimap:
             for v in trimap_variants:
@@ -1081,6 +1081,7 @@ def main():
                         "layout_seconds": round(float(layout_s), 3),
                     }
                 )
+                _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
 
         if not args.no_phate:
             for v in phate_variants:
@@ -1126,6 +1127,7 @@ def main():
                         "layout_seconds": round(float(layout_s), 3),
                     }
                 )
+                _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
 
         if not args.no_forceatlas2:
             for v in forceatlas2_variants:
@@ -1160,6 +1162,7 @@ def main():
                         "layout_seconds": round(float(layout_s), 3),
                     }
                 )
+                _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
 
         if not args.no_spring:
             for v in spring_variants:
@@ -1192,6 +1195,7 @@ def main():
                         "layout_seconds": round(float(layout_s), 3),
                     }
                 )
+                _flush_outputs(nodes_df, run_rows, nodes_out, runs_out)
 
     if not args.no_procrustes:
         _apply_procrustes_to_layouts(nodes_df)

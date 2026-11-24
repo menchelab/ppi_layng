@@ -48,3 +48,18 @@ input/
 output/
 data/
 temp/
+
+# --- Large / regenerable artifacts (GitHub hard limit 100 MB, warns >50 MB) ---
+# random walks (hundreds of MB) - regenerate with 3_run_walks.py
+output/walks.npy
+output/walks.parquet
+# GO annotations (~180 MB) - fetched by 1_download_data.py
+data/goa_human.gaf
+data/*.gaf
+# installers / binaries
+*.exe
+*.msi
+# misc
+*.log
+.idea/
+.vscode/
